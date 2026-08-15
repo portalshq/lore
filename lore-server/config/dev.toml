@@ -1,0 +1,19 @@
+# Secure-by-default development profile. Supply a local HTTPS JWKS endpoint and
+# issuer when LORE_SECURITY_MODE=strict is enabled. Use the `dev-local` profile
+# only for explicitly isolated compatibility testing.
+
+[server.auth]
+jwt_audience = ["lore", "portals.sh"]
+
+[server.quic]
+enabled = false
+
+[server.grpc]
+enabled = true
+verify_client_certs = false
+
+[server.grpc_public_services]
+admin_service_enabled = false
+
+[server.http]
+store_health_check = true

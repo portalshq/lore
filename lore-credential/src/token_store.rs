@@ -98,7 +98,7 @@ pub fn tokens_only_for_recipient_domain(domain: String) -> impl FnMut(&&Identity
         // Once end users are using the latest version of Lore then we can remove this case. Without
         // this check, new Lore clients with old tokens will have to run login again
         if item.acceptable_root_domains.is_empty() {
-            true
+            !strict_security_mode()
         } else {
             domain_in_root_domains(&domain, &item.acceptable_root_domains)
         }
@@ -275,7 +275,27 @@ fn store_open_options() -> fs::OpenOptions {
         use std::os::windows::fs::OpenOptionsExt;
         options.share_mode(windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ);
     }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
     options
+}
+
+fn strict_security_mode() -> bool {
+    std::env::var("LORE_SECURITY_MODE").is_ok_and(|value| value.eq_ignore_ascii_case("strict"))
+}
+
+#[cfg(unix)]
+fn enforce_private_permissions(path: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+}
+
+#[cfg(not(unix))]
+fn enforce_private_permissions(_path: &Path) -> std::io::Result<()> {
+    Ok(())
 }
 
 /// Serializes store file access across lore processes via the `<file>.lock`
@@ -324,6 +344,9 @@ fn load_token_map(_guard: &FSLock) -> Result<TokenMap, TokenStoreError> {
             ));
         }
     };
+    enforce_private_permissions(path.as_path()).map_err(|e| {
+        TokenStoreError::internal_with_context(e, "Failed to secure token map permissions")
+    })?;
 
     let mut config = String::default();
     // Read via the guarded handle; `fs::read_to_string` would re-open the
@@ -369,6 +392,9 @@ fn store_token_map(_guard: &FSLock, token_map: &TokenMap) -> Result<(), TokenSto
             ));
         }
     };
+    enforce_private_permissions(path.as_path()).map_err(|e| {
+        TokenStoreError::internal_with_context(e, "Failed to secure token map permissions")
+    })?;
 
     // Truncate only after the write guard is held, so a concurrent reader
     // can never observe a partially written file.
@@ -1011,6 +1037,10 @@ async fn get_secret_from_store(target: &str) -> Result<Vec<u8>, TokenStoreError>
         }
     }
 
+    if strict_security_mode() {
+        return Ok(Vec::new());
+    }
+
     let path = store_fallback_path(target, false).map_err(|e| {
         lore_warn!("Failed to make fallback path: {e}");
         TokenStoreError::internal_with_context(e, "Failed to make fallback path")
@@ -1034,8 +1064,8 @@ async fn get_secret_from_store(target: &str) -> Result<Vec<u8>, TokenStoreError>
             ));
         }
     };
-    lore_trace!(
-        "Loaded secret from insecure fallback path {}",
+    lore_warn!(
+        "Using explicitly enabled insecure development credential fallback at {}",
         path.display()
     );
 
@@ -1065,10 +1095,21 @@ async fn set_secret_in_store(target: &str, secret: Vec<u8>) -> Result<Vec<u8>, T
             lore_trace!("Stored secret in secure store {target}");
             return Ok(secret);
         }
+        if strict_security_mode() {
+            return Err(TokenStoreError::internal(
+                "OS secure storage is required in strict security mode",
+            ));
+        }
         // If we fallback to disk storage, ensure further get calls use this
         unsafe {
             std::env::set_var("LORE_AUTH_STORE", "fallback");
         }
+    }
+
+    if strict_security_mode() {
+        return Err(TokenStoreError::internal(
+            "OS secure storage is required in strict security mode",
+        ));
     }
 
     let path = store_fallback_path(target, true).map_err(|e| {
@@ -1082,6 +1123,9 @@ async fn set_secret_in_store(target: &str, secret: Vec<u8>) -> Result<Vec<u8>, T
         lore_warn!("Failed to write secret to fallback path: {e}");
         TokenStoreError::internal_with_context(e, "Failed to write secret to fallback path")
     })?;
+    enforce_private_permissions(path.as_path()).map_err(|e| {
+        TokenStoreError::internal_with_context(e, "Failed to secure fallback key permissions")
+    })?;
     secret_file
         .set_len(0)
         .and_then(|()| secret_file.write_all(&secret))
@@ -1089,7 +1133,10 @@ async fn set_secret_in_store(target: &str, secret: Vec<u8>) -> Result<Vec<u8>, T
             lore_warn!("Failed to write secret to fallback path: {e}");
             TokenStoreError::internal_with_context(e, "Failed to write secret to fallback path")
         })?;
-    lore_trace!("Stored secret in insecure fallback path {}", path.display());
+    lore_warn!(
+        "Stored credential encryption material in explicitly enabled insecure development fallback at {}",
+        path.display()
+    );
     Ok(secret)
 }
 
@@ -1146,6 +1193,27 @@ impl NonceSequence for CounterNonceSequence {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn fallback_files_are_created_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let path = std::env::temp_dir().join(format!(
+            "lore-token-permissions-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        let mut options = store_open_options();
+        options.create_new(true).write(true);
+        options.open(&path).expect("create credential fixture");
+        let mode = fs::metadata(&path).expect("metadata").permissions().mode() & 0o777;
+        fs::remove_file(&path).expect("remove fixture");
+        assert_eq!(mode, 0o600);
+    }
 
     #[test]
     fn refresh_token_serde_default_none() {

@@ -40,8 +40,9 @@ use crate::util::setup_execution;
 /// `lore.repository.v1.RepositoryService.RepositoryCreate` handler.
 ///
 /// The caller pre-generates `id` and `default_branch_id` for retry
-/// idempotency. The server assigns `created`. `creator` is hybrid:
-/// caller-set if permitted, otherwise the authenticated JWT identity.
+/// idempotency. The server assigns `created`. With external authentication,
+/// the verified JWT identity is authoritative for `creator`; caller-selected
+/// creator values remain only for unauthenticated local development.
 #[tracing::instrument(
     name = "RepositoryCreate::v1::handle",
     skip_all,
@@ -69,10 +70,13 @@ pub async fn handler(
     let description = req.description;
     let default_branch_id: Context = req.default_branch_id.into();
     let default_branch_name = req.default_branch_name;
-    let creator = req
-        .creator
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| user_id.clone());
+    let creator = if auth_url.is_some() {
+        user_id.clone()
+    } else {
+        req.creator
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| user_id.clone())
+    };
 
     let created = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -194,6 +198,11 @@ async fn repository_create_inner(
                 "Repository {} already exist with name {}, early out create successful",
                 repository.id, metadata.name
             );
+            if auth_url.is_some() && metadata.creator != creator {
+                return Err(Status::permission_denied(
+                    "Repository is owned by another subject",
+                ));
+            }
 
             if repository_load_name(repository.clone(), name, None, None)
                 .await
@@ -206,6 +215,13 @@ async fn repository_create_inner(
                 let _ = repository::store_name_to_id(repository.clone(), name, repository.id)
                     .await
                     .inspect_err(|err| info!("Recreate name -> ID mapping failed: {err}"));
+            }
+
+            if let Some(auth_url) = auth_url.as_ref() {
+                let client =
+                    Box::new(crate::authnz::rebac::grpc_get_rebac_client(auth_url.clone()).await?);
+                repository_create_auth_resource(client, authorization.clone(), repository.id, name)
+                    .await?;
             }
 
             Ok((metadata, metadata_hash))
@@ -224,6 +240,17 @@ async fn repository_create_inner(
                 "Repository {} already exist with id {}, early out create successful",
                 name, id
             );
+            if auth_url.is_some() && metadata.creator != creator {
+                return Err(Status::permission_denied(
+                    "Repository is owned by another subject",
+                ));
+            }
+            if let Some(auth_url) = auth_url.as_ref() {
+                let client =
+                    Box::new(crate::authnz::rebac::grpc_get_rebac_client(auth_url.clone()).await?);
+                repository_create_auth_resource(client, authorization.clone(), repository.id, name)
+                    .await?;
+            }
             Ok((metadata, metadata_hash))
         } else {
             Err(Status::already_exists(format!(
@@ -231,11 +258,6 @@ async fn repository_create_inner(
                 name, id, repository.id
             )))
         };
-    }
-
-    if let Some(auth_url) = auth_url {
-        let client = Box::new(crate::authnz::rebac::grpc_get_rebac_client(auth_url).await?);
-        repository_create_auth_resource(client, authorization, repository.id, name).await?;
     }
 
     let metadata = RepositoryMetadata {
@@ -296,6 +318,14 @@ async fn repository_create_inner(
                 repository.id
             ))
         })?;
+
+    // Storage is authoritative. Persist the owner only after the repository is
+    // durable; the idempotent early-return paths above repair a failed or lost
+    // ReBAC response without creating an authorization-only orphan.
+    if let Some(auth_url) = auth_url {
+        let client = Box::new(crate::authnz::rebac::grpc_get_rebac_client(auth_url).await?);
+        repository_create_auth_resource(client, authorization, repository.id, name).await?;
+    }
 
     info!("Created repository {} with ID {}", name, repository.id);
 

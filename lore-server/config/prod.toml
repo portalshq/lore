@@ -1,0 +1,20 @@
+# Production security invariants. Endpoint and issuer are injected by the
+# deployment because they are account-specific; missing values fail startup.
+
+[server.auth]
+jwt_audience = ["lore", "portals.sh"]
+
+[server.quic]
+enabled = false
+
+[server.grpc]
+enabled = true
+# TLS terminates at the ALB. This h2c hop is permitted only inside the isolated
+# VPC and is tracked as a time-bounded residual risk in the security ADR.
+verify_client_certs = false
+
+[server.grpc_public_services]
+admin_service_enabled = false
+
+[server.http]
+store_health_check = true

@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: 2026 Epic Games, Inc.
 // SPDX-License-Identifier: MIT
 use lore_proto::RebacApiClient as RebacApiGrpcClient;
+use lore_proto::rebac::ConfirmResourceDeletedRequest;
+use lore_proto::rebac::ConfirmResourceDeletedResponse;
 use lore_proto::rebac::CreateResourceRequest;
 use lore_proto::rebac::CreateResourceResponse;
 use lore_proto::rebac::DeleteResourceRequest;
@@ -34,6 +36,11 @@ pub trait RebacApiClient {
         &mut self,
         request: Request<DeleteResourceRequest>,
     ) -> RebacApiResult<DeleteResourceResponse>;
+
+    async fn confirm_resource_deleted(
+        &mut self,
+        request: Request<ConfirmResourceDeletedRequest>,
+    ) -> RebacApiResult<ConfirmResourceDeletedResponse>;
 }
 
 pub struct RebacClientHelper {
@@ -43,9 +50,13 @@ pub struct RebacClientHelper {
 
 impl RebacClientHelper {
     async fn new(auth_url: String) -> Result<RebacClientHelper, Status> {
-        let mut endpoint = tonic::transport::Endpoint::from_shared(auth_url.clone())
+        // Authentication exchange is public; relationship mutation is not.
+        // Production supplies an ECS Service Connect URL. The fallback keeps
+        // local development compatible with the combined test service.
+        let rebac_url = std::env::var("LORE_REBAC_URL").unwrap_or(auth_url);
+        let mut endpoint = tonic::transport::Endpoint::from_shared(rebac_url.clone())
             .warn_map_err(|_| Status::internal("Failed to create rebac endpoint"))?;
-        if auth_url.starts_with("https://") {
+        if rebac_url.starts_with("https://") {
             endpoint = endpoint
                 .tls_config(
                     ClientTlsConfig::new()
@@ -85,6 +96,18 @@ impl RebacApiClient for RebacClientHelper {
             self.latency_histogram_ms(METRICS_OPERATION_LATENCY_METRIC_NAME),
             &self.get_labels_for_operation_context("delete_resource"),
             self.client.delete_resource(request).await
+        )
+        .result
+    }
+
+    async fn confirm_resource_deleted(
+        &mut self,
+        request: Request<ConfirmResourceDeletedRequest>,
+    ) -> RebacApiResult<ConfirmResourceDeletedResponse> {
+        timed!(
+            self.latency_histogram_ms(METRICS_OPERATION_LATENCY_METRIC_NAME),
+            &self.get_labels_for_operation_context("confirm_resource_deleted"),
+            self.client.confirm_resource_deleted(request).await
         )
         .result
     }

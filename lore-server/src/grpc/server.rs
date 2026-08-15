@@ -94,6 +94,7 @@ pub struct GrpcServiceSettings {
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct GrpcPublicServicesSettings {
+    pub admin_service_enabled: Option<bool>,
     pub lock_service: Option<GrpcServiceSettings>,
     pub forwarded_requests: Option<ForwardedRequestsSettings>,
 }
@@ -387,8 +388,9 @@ impl GrpcServerBuilder<WantsAdminEndpoints> {
         self,
         settings: HashMap<String, String>,
         features: Vec<String>,
+        enabled: bool,
     ) -> GrpcServerBuilder<WantsHttp2Config> {
-        let admin_svc = LoreAdminService::new(
+        let mut admin_svc = LoreAdminService::new(
             settings,
             features,
             self.0.immutable_store.clone(),
@@ -396,6 +398,7 @@ impl GrpcServerBuilder<WantsAdminEndpoints> {
             self.0.notification_sender.clone(),
             self.0.hook_dispatcher.clone(),
         );
+        admin_svc.set_enabled(enabled);
         GrpcServerBuilder(WantsHttp2Config {
             environment: self.0.environment,
             feature: self.0.feature,
@@ -597,6 +600,32 @@ impl GrpcServerBuilder<MaybeJwtVerifier> {
             .layer(LoreTracingLayer {})
             .layer(metrics_layer)
             .layer(GrpcResponseTraceLayer {});
+
+        // ALB gRPC target groups require a gRPC health endpoint and gRPC
+        // status-code matcher. Keep its serving status tied to the same
+        // backing-store availability primitive used by HTTP readiness so an
+        // open socket is never mistaken for a healthy data plane.
+        let (health_reporter, health_service) = tonic_health::server::health_reporter();
+        let health_store = self.0.immutable_store.clone();
+        tokio::spawn(async move {
+            loop {
+                if health_store
+                    .clone()
+                    .is_available(Duration::from_secs(5))
+                    .await
+                {
+                    health_reporter
+                        .set_service_status("", tonic_health::ServingStatus::Serving)
+                        .await;
+                } else {
+                    health_reporter
+                        .set_service_status("", tonic_health::ServingStatus::NotServing)
+                        .await;
+                }
+                tokio::time::sleep(Duration::from_secs(30)).await;
+            }
+        });
+        let router = router.add_service(health_service);
 
         let mut router = router.add_service(AdminServiceServer::new(admin_svc));
 

@@ -31,6 +31,8 @@ use crate::topology::TopologySettings;
 //#[serde(deny_unknown_fields)]
 #[serde(bound(deserialize = "'de: 'static"))]
 pub struct Settings {
+    #[serde(skip)]
+    pub deployment_environment: String,
     pub environment: Option<EnvironmentConfig>,
     pub immutable_store: ImmutableStoreSettings,
     pub mutable_store: MutableStoreSettings,
@@ -152,16 +154,24 @@ impl Settings {
                     .required(false),
             );
         }
-        settings_builder = settings_builder
-            .add_source(config::File::with_name(&format!("{config_path}/local")).required(false));
+        // Local-only defaults must never bleed into staging or production.
+        // In particular, local.toml references a development TLS key and local
+        // filesystem stores. Environment variables remain the final override.
+        if matches!(environment, "local" | "dev-local") {
+            settings_builder = settings_builder.add_source(
+                config::File::with_name(&format!("{config_path}/local")).required(false),
+            );
+        }
 
         settings_builder =
             settings_builder.add_source(config::Environment::with_prefix("lore").separator("__"));
 
         let settings = settings_builder.build()?;
-        let settings: Settings = settings.try_deserialize()?;
+        let mut settings: Settings = settings.try_deserialize()?;
+        settings.deployment_environment = environment.to_string();
         validate_trace_config(&settings)?;
         validate_feature_config(&settings)?;
+        validate_security_config(&settings, environment)?;
         let settings_string = format!("{settings:?}");
         let settings_hash = hash::hash_string(&settings_string);
 
@@ -170,6 +180,78 @@ impl Settings {
 
         Ok((settings, settings_hash))
     }
+}
+
+fn validate_security_config(
+    settings: &Settings,
+    environment: &str,
+) -> Result<(), config::ConfigError> {
+    let strict = matches!(environment, "prod" | "production" | "staging")
+        || std::env::var("LORE_SECURITY_MODE")
+            .is_ok_and(|value| value.eq_ignore_ascii_case("strict"));
+    if !strict {
+        return Ok(());
+    }
+
+    let auth = settings.server.auth.as_ref().ok_or_else(|| {
+        config::ConfigError::Message("strict security mode requires server.auth".to_string())
+    })?;
+    let endpoint = auth
+        .jwk
+        .as_ref()
+        .map(|jwk| jwk.endpoint.as_str())
+        .unwrap_or_default();
+    if !endpoint.starts_with("https://") {
+        return Err(config::ConfigError::Message(
+            "strict security mode requires an HTTPS server.auth.jwk.endpoint".to_string(),
+        ));
+    }
+    if let Some(jwk) = auth.jwk.as_ref()
+        && (jwk.refresh_interval_seconds == 0
+            || jwk.refresh_interval_seconds > 60
+            || jwk.max_stale_seconds > 600)
+    {
+        return Err(config::ConfigError::Message(
+            "strict security mode requires JWKS refresh <= 60s and stale use <= 600s".to_string(),
+        ));
+    }
+    if !auth
+        .jwt_issuer
+        .as_deref()
+        .is_some_and(|issuer| issuer.starts_with("https://"))
+    {
+        return Err(config::ConfigError::Message(
+            "strict security mode requires an HTTPS server.auth.jwt_issuer".to_string(),
+        ));
+    }
+    let audiences = auth.jwt_audience.as_deref().unwrap_or_default();
+    if !audiences.iter().any(|audience| audience == "lore")
+        || !audiences.iter().any(|audience| audience == "portals.sh")
+    {
+        return Err(config::ConfigError::Message(
+            "strict security mode requires JWT audiences 'lore' and 'portals.sh'".to_string(),
+        ));
+    }
+    if settings
+        .server
+        .grpc_public_services
+        .as_ref()
+        .and_then(|services| services.admin_service_enabled)
+        .unwrap_or(true)
+    {
+        return Err(config::ConfigError::Message(
+            "strict security mode requires AdminService to be disabled".to_string(),
+        ));
+    }
+    if let Some(grpc) = settings.server.grpc.as_ref()
+        && grpc.verify_client_certs
+        && grpc.certificate.is_none()
+    {
+        return Err(config::ConfigError::Message(
+            "gRPC client-certificate verification requires server.grpc.certificate".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 fn validate_trace_config(settings: &Settings) -> Result<(), config::ConfigError> {

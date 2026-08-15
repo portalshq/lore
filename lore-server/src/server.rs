@@ -428,6 +428,10 @@ async fn launch_grpc_server(
         .clone()
         .ok_or(anyhow!("Missing gRPC settings"))?;
     let service_settings = settings.server.grpc_public_services.clone();
+    let admin_service_enabled = service_settings
+        .as_ref()
+        .and_then(|services| services.admin_service_enabled)
+        .unwrap_or(true);
 
     let addr =
         SocketAddr::from_str(format!("{}:{}", grpc_settings.host, grpc_settings.port).as_str())?;
@@ -480,7 +484,7 @@ async fn launch_grpc_server(
         .with_notification(notification_sender, notification_service)
         .with_hook_dispatcher(hook_dispatcher)
         .with_tls_config(cert_path, key_path, cert_chain_path)?
-        .with_admin_endpoints(settings_map, features_list)
+        .with_admin_endpoints(settings_map, features_list, admin_service_enabled)
         .with_http2_config(
             grpc_settings
                 .http2_keepalive_interval_seconds
@@ -1747,6 +1751,8 @@ async fn async_main(settings: (Settings, StringHash), config: ServerConfig) -> R
                     jwk_service: Arc::new(jwk_service),
                     jwt_issuer: auth.jwt_issuer.clone(),
                     jwt_audience: auth.jwt_audience.clone(),
+                    algorithm: jsonwebtoken::Algorithm::RS256,
+                    required_environment: Some(settings.deployment_environment.clone()),
                 };
                 Some(jwt_verifier)
             }

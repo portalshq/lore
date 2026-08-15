@@ -7,6 +7,7 @@ use lore_base::types::Context;
 use lore_base::types::Hash;
 use lore_proto::RepositoryDeleteRequest;
 use lore_proto::RepositoryDeleteResponse;
+use lore_proto::rebac::ConfirmResourceDeletedRequest;
 use lore_proto::rebac::DeleteResourceRequest;
 use lore_revision::branch;
 use lore_revision::lore::RepositoryId;
@@ -98,6 +99,13 @@ async fn repository_delete(
     )
     .await
     else {
+        // The data-plane deletion may have succeeded while the ReBAC cleanup
+        // response was lost. Retrying repairs that partial operation.
+        if let Some(auth_url) = auth_url {
+            repository_confirm_auth_resource_deleted(auth_url, authorization, repository.id)
+                .await?;
+            return Ok(());
+        }
         return Err(Status::not_found("Repository does not exist"));
     };
 
@@ -107,9 +115,10 @@ async fn repository_delete(
 
     let user_id = execution_context().user_id().await;
 
-    if let Some(auth_url) = auth_url {
+    if let Some(auth_url) = auth_url.as_ref() {
         // Use external auth service to authorize deletion
-        repository_delete_auth_resource(auth_url, authorization, repository.id).await?;
+        repository_delete_auth_resource(auth_url.clone(), authorization.clone(), repository.id)
+            .await?;
     } else {
         // If not using external auth service, check that the current user is the creator
         if metadata.creator != user_id && !force {
@@ -173,6 +182,10 @@ async fn repository_delete(
         }
     }
 
+    if let Some(auth_url) = auth_url {
+        repository_confirm_auth_resource_deleted(auth_url, authorization, repository.id).await?;
+    }
+
     info!(
         "Deleted repository {} with ID {}",
         metadata.name, repository.id
@@ -205,5 +218,30 @@ pub(crate) async fn repository_delete_auth_resource(
         Status::internal(format!("Failed to call auth delete_resource: {err}"))
     })?;
 
+    Ok(())
+}
+
+pub(crate) async fn repository_confirm_auth_resource_deleted(
+    auth_url: String,
+    authorization: Option<String>,
+    repository_id: RepositoryId,
+) -> Result<(), Status> {
+    let mut client = grpc_get_rebac_client(auth_url).await?;
+    let request = create_request_with_authorization(
+        ConfirmResourceDeletedRequest {
+            resource_id: format!("urc-{repository_id}"),
+        },
+        authorization,
+    )?;
+    client
+        .confirm_resource_deleted(request)
+        .await
+        .warn_map_err(|err| {
+            if matches!(err.code(), Code::PermissionDenied | Code::Unauthenticated) {
+                Status::permission_denied("Repository deletion confirmation denied")
+            } else {
+                Status::internal(format!("Failed to confirm auth resource deletion: {err}"))
+            }
+        })?;
     Ok(())
 }

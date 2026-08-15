@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use jsonwebtoken::DecodingKey;
@@ -28,9 +29,30 @@ struct JWKServiceKey {
     algorithm: jsonwebtoken::Algorithm,
 }
 
-#[derive(Clone, Default, Deserialize, Debug)]
+#[derive(Clone, Deserialize, Debug)]
 pub struct JWKServiceSettings {
     pub endpoint: String,
+    #[serde(default = "default_refresh_interval_seconds")]
+    pub refresh_interval_seconds: u64,
+    #[serde(default = "default_max_stale_seconds")]
+    pub max_stale_seconds: u64,
+}
+
+fn default_refresh_interval_seconds() -> u64 {
+    60
+}
+fn default_max_stale_seconds() -> u64 {
+    600
+}
+
+impl Default for JWKServiceSettings {
+    fn default() -> Self {
+        Self {
+            endpoint: String::new(),
+            refresh_interval_seconds: default_refresh_interval_seconds(),
+            max_stale_seconds: default_max_stale_seconds(),
+        }
+    }
 }
 
 #[derive(Error, Debug)]
@@ -55,10 +77,11 @@ pub trait JWKService: Send + Sync {
     ) -> Result<(DecodingKey, jsonwebtoken::Algorithm), JWKServiceError>;
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct JwkServiceImpl {
     // allow to be refetched from different threads if needed
     cached_set: Arc<tokio::sync::RwLock<HashMap<String, JWKServiceKey>>>,
+    last_successful_refresh: Arc<tokio::sync::RwLock<Option<Instant>>>,
     #[allow(dead_code)]
     settings: JWKServiceSettings,
 }
@@ -67,6 +90,7 @@ impl JwkServiceImpl {
     pub fn new(settings: JWKServiceSettings) -> Self {
         JwkServiceImpl {
             cached_set: Default::default(),
+            last_successful_refresh: Default::default(),
             settings,
         }
     }
@@ -83,11 +107,18 @@ impl JwkServiceImpl {
     /// Fetch the latest keys and replace the local cache. If `desired` is not-`None`,
     /// short-circuits if the key id is already present in the local cache.
     pub async fn fetch_new_keys(&self, desired: Option<&str>) -> Result<(), JWKServiceError> {
-        let mut cache = self.cached_set.write().await;
-
-        // Check to see if the desired key was fetched while we waited for the lock.
-        if desired.map(|d| cache.get(d)).is_some() {
-            return Ok(());
+        if let Some(desired) = desired {
+            let cache = self.cached_set.read().await;
+            let fresh = self
+                .last_successful_refresh
+                .read()
+                .await
+                .is_some_and(|instant| {
+                    instant.elapsed() <= Duration::from_secs(self.settings.refresh_interval_seconds)
+                });
+            if fresh && cache.contains_key(desired) {
+                return Ok(());
+            }
         }
 
         let client = reqwest::Client::builder()
@@ -158,7 +189,8 @@ impl JwkServiceImpl {
             );
         }
 
-        *cache = new_set;
+        *self.cached_set.write().await = new_set;
+        *self.last_successful_refresh.write().await = Some(Instant::now());
 
         Ok(())
     }
@@ -170,16 +202,28 @@ impl JWKService for JwkServiceImpl {
         &self,
         kid: &str,
     ) -> Result<(DecodingKey, jsonwebtoken::Algorithm), JWKServiceError> {
-        let key = self.get_cached_key(kid).await;
+        let cached = self.get_cached_key(kid).await;
+        let age = self
+            .last_successful_refresh
+            .read()
+            .await
+            .map(|instant| instant.elapsed());
+        let refresh_after = Duration::from_secs(self.settings.refresh_interval_seconds);
+        if cached.is_ok() && age.is_some_and(|age| age <= refresh_after) {
+            return cached;
+        }
 
-        match key {
-            Ok(_) => key,
-            Err(JWKServiceError::NotFound) => {
-                // one more try after fetch
-                self.fetch_new_keys(Some(kid)).await?;
-                self.get_cached_key(kid).await
+        match self.fetch_new_keys(None).await {
+            Ok(()) => self.get_cached_key(kid).await,
+            Err(error) => {
+                let max_stale = Duration::from_secs(self.settings.max_stale_seconds);
+                if cached.is_ok() && age.is_some_and(|age| age <= max_stale) {
+                    warn!("JWKS refresh failed; using a bounded stale key: {error:?}");
+                    cached
+                } else {
+                    Err(error)
+                }
             }
-            Err(e) => Err(e),
         }
     }
 }
