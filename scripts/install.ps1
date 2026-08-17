@@ -5,9 +5,8 @@
 .DESCRIPTION
     PowerShell peer of scripts/install.sh. Works on Windows PowerShell 5.1 and PowerShell 7+.
 
-    Quick start:
-      irm https://raw.githubusercontent.com/EpicGames/lore/main/scripts/install.ps1 | iex
-      $env:LORE_DEMO=1; irm https://raw.githubusercontent.com/EpicGames/lore/main/scripts/install.ps1 | iex
+    Nap invokes this installer with an immutable portalshq/lore release tag and
+    the SHA-256 of that release's signed SHA256SUMS manifest.
 
     For parameters and their env-var equivalents, run with -Help.
 .EXAMPLE
@@ -18,8 +17,8 @@ param(
     [switch] $Demo,
     [switch] $Server,
     [string] $Version    = $env:LORE_VERSION,
+    [string] $ManifestSha256 = $env:LORE_MANIFEST_SHA256,
     [string] $InstallDir = $env:LORE_INSTALL_DIR,
-    [string] $Repo       = $env:LORE_REPO,
     [string] $Token      = $env:GITHUB_TOKEN,
     [switch] $Help
 )
@@ -37,23 +36,27 @@ function Show-Usage {
 @"
 Install the Lore CLI (and, with -Demo, a local loreserver) from GitHub Releases.
 
-Usage: install.ps1 [-Demo] [-Server] [-Version <v>] [-InstallDir <dir>] [-Repo <owner/repo>] [-Token <t>]
+Usage: install.ps1 [-Demo] [-Server] -Version <v> -ManifestSha256 <sha256:hex> [-InstallDir <dir>] [-Token <t>]
 
 Every parameter has an env-var equivalent; the parameter wins when both are set:
 
   -Demo              LORE_DEMO         also install and launch a local loreserver (1/true/yes/on/enabled)
   -Server            LORE_SERVER       only install loreserver (skip the lore CLI and auto-launch)
-  -Version <v>       LORE_VERSION      install a specific release tag (default: latest)
+  -Version <v>       LORE_VERSION      install an immutable portalshq/lore release tag
+  -ManifestSha256    LORE_MANIFEST_SHA256
+                                     expected SHA-256 of the signed SHA256SUMS file
   -InstallDir <dir>  LORE_INSTALL_DIR  where binaries go (default: %USERPROFILE%\bin)
-  -Repo <owner/repo> LORE_REPO         source repository (default: EpicGames/lore)
   -Token <t>         GITHUB_TOKEN      token for private repos / higher rate limit (defaults to `gh auth token`)
   -Help                                show this help
 "@ -split "`n" | ForEach-Object { [Console]::Error.WriteLine($_) }
 }
 if ($Help) { Show-Usage; exit 0 }
 
-if (-not $Repo)       { $Repo = 'EpicGames/lore' }
-if (-not $Version)    { $Version = 'latest' }
+$Repo = 'portalshq/lore'
+if (-not $Version -or $Version -eq 'latest') { Die 'an immutable -Version is required' }
+if ($ManifestSha256 -notmatch '^sha256:[a-f0-9]{64}$') {
+    Die '-ManifestSha256 must be sha256 followed by 64 lowercase hexadecimal characters'
+}
 if (-not $InstallDir) { $InstallDir = Join-Path $env:USERPROFILE 'bin' }
 # -Demo is a switch; also honor $env:LORE_DEMO (accepts 1/true/yes/on/enabled).
 $DemoOn   = $Demo.IsPresent   -or (@('1','true','yes','on','enabled') -contains "$($env:LORE_DEMO)".ToLower())
@@ -105,10 +108,10 @@ function Get-Release {
 # The asset's API url (.../releases/assets/<id>), NOT browser_download_url, so the
 # download can send Accept: application/octet-stream + bearer -- the only way a
 # private-repo asset downloads.
-function Get-AssetUrl {
+function Get-BinaryAsset {
     param([object]$Release, [string]$Bin)
     $a = $Release.assets | Where-Object { $_.name -match "^$Bin-v?\d.*-$Triple\.zip$" } | Select-Object -First 1
-    if ($a) { return $a.url } else { return $null }
+    return $a
 }
 
 # Resolve a single 302 without following it, returning the Location (5.1 path).
@@ -141,21 +144,35 @@ function Save-Asset {
     }
 }
 
+function Assert-ArchiveChecksum {
+    param([string]$Archive)
+    $name = Split-Path -Leaf $Archive
+    $escapedName = [Regex]::Escape($name)
+    $line = Get-Content -Path $ChecksumManifest | Where-Object {
+        $_ -match "^([a-f0-9]{64})\s+\*?$escapedName$"
+    } | Select-Object -First 1
+    if (-not $line) { Die "signed manifest has no checksum for $name" }
+    $expected = ([Regex]::Match($line, '^([a-f0-9]{64})')).Groups[1].Value
+    $actual = (Get-FileHash -Algorithm SHA256 -Path $Archive).Hash.ToLowerInvariant()
+    if ($actual -ne $expected) { Die "checksum mismatch for $name" }
+}
+
 # Download, unpack, and install <bin>.exe into $InstallDir, replacing any existing copy.
 function Install-Binary {
     param([object]$Release, [string]$Bin)
     $exe     = "$Bin.exe"
     $binPath = Join-Path $InstallDir $exe
-    $url = Get-AssetUrl -Release $Release -Bin $Bin
-    if (-not $url) { Die "no $Bin release found for $Triple (repo=$Repo version=$Version)" }
+    $asset = Get-BinaryAsset -Release $Release -Bin $Bin
+    if (-not $asset) { Die "no $Bin release found for $Triple (repo=$Repo version=$Version)" }
 
     if (Get-Command $Bin -ErrorAction SilentlyContinue) {
         $cur = (& $Bin --version 2>$null); if (-not $cur) { $cur = $Bin }
         Say "$cur found - updating"
     } else { Say "installing $Bin" }
 
-    $zip = Join-Path $Work "$Bin.zip"
-    Save-Asset -Url $url -OutFile $zip
+    $zip = Join-Path $Work $asset.name
+    Save-Asset -Url $asset.url -OutFile $zip
+    Assert-ArchiveChecksum -Archive $zip
     $out = Join-Path $Work "$Bin-unzipped"
     Expand-Archive -Path $zip -DestinationPath $out -Force
     # Asset may be flat ($out\<bin>.exe) or nested under a versioned folder
@@ -254,6 +271,15 @@ try {
     catch {
         Die ("could not fetch $Version release for ${Repo}: $($_.Exception.Message)`n" +
              "hint: for a private repo set GITHUB_TOKEN or run 'gh auth login'")
+    }
+
+    $manifestAsset = $release.assets | Where-Object { $_.name -eq 'SHA256SUMS' } | Select-Object -First 1
+    if (-not $manifestAsset) { Die 'release has no SHA256SUMS asset' }
+    $ChecksumManifest = Join-Path $Work 'SHA256SUMS'
+    Save-Asset -Url $manifestAsset.url -OutFile $ChecksumManifest
+    $actualManifestSha256 = 'sha256:' + (Get-FileHash -Algorithm SHA256 -Path $ChecksumManifest).Hash.ToLowerInvariant()
+    if ($actualManifestSha256 -ne $ManifestSha256) {
+        Die 'SHA256SUMS does not match the trusted manifest digest'
     }
 
     if ($DemoOn) {

@@ -1,17 +1,17 @@
 #!/usr/bin/env bash
 # Install the Lore CLI (and, with --demo, a local loreserver) from GitHub Releases.
 #
-# Quick start:
-#   curl -fsSL https://raw.githubusercontent.com/EpicGames/lore/main/scripts/install.sh | bash
-#   curl -fsSL https://raw.githubusercontent.com/EpicGames/lore/main/scripts/install.sh | bash -s -- --demo
+# This installer is invoked by Nap with an immutable release tag and the
+# SHA-256 of that release's signed SHA256SUMS manifest.
 #
 # On Windows, use the PowerShell peer scripts/install.ps1.
 # For flags and their env-var equivalents, run with --help.
 
 set -euo pipefail
 
-REPO="${LORE_REPO:-EpicGames/lore}"
+REPO="portalshq/lore"
 VERSION="${LORE_VERSION:-latest}"
+MANIFEST_SHA256="${LORE_MANIFEST_SHA256:-}"
 INSTALL_DIR="${LORE_INSTALL_DIR:-$HOME/.local/bin}"
 TOKEN="${GITHUB_TOKEN:-}"
 GRPC_PORT=41337
@@ -28,15 +28,16 @@ usage() {
     cat >&2 <<'EOF'
 Install the Lore CLI (and, with --demo, a local loreserver) from GitHub Releases.
 
-Usage: install.sh [--demo] [--server] [--version <v>] [--install-dir <dir>] [--repo <owner/repo>] [--token <t>]
+Usage: install.sh [--demo] [--server] --version <v> --manifest-sha256 <sha256:hex> [--install-dir <dir>] [--token <t>]
 
 Every flag has an env-var equivalent; the flag wins when both are set:
 
   --demo               LORE_DEMO          also install and launch a local loreserver (1/true/yes/on/enabled)
   --server             LORE_SERVER        only install loreserver (skip the lore CLI and auto-launch)
-  --version <v>        LORE_VERSION       install a specific release tag (default: latest)
+  --version <v>        LORE_VERSION       install an immutable portalshq/lore release tag
+  --manifest-sha256    LORE_MANIFEST_SHA256
+                                         expected SHA-256 of the signed SHA256SUMS file
   --install-dir <dir>  LORE_INSTALL_DIR   where binaries go (default: ~/.local/bin)
-  --repo <owner/repo>  LORE_REPO          source repository (default: EpicGames/lore)
   --token <t>          GITHUB_TOKEN       token for private repos / higher rate limit (defaults to `gh auth token`)
   -h, --help                              show this help
 EOF
@@ -47,14 +48,18 @@ while [[ $# -gt 0 ]]; do
         --demo) DEMO=1 ;;
         --server) SERVER=1 ;;
         --version) VERSION="${2:?--version needs a value}"; shift ;;
+        --manifest-sha256) MANIFEST_SHA256="${2:?--manifest-sha256 needs a value}"; shift ;;
         --install-dir) INSTALL_DIR="${2:?--install-dir needs a value}"; shift ;;
-        --repo) REPO="${2:?--repo needs a value}"; shift ;;
         --token) TOKEN="${2:?--token needs a value}"; shift ;;
         -h|--help) usage; exit 0 ;;
         *) die "unknown argument: $1 (try --help)" ;;
     esac
     shift
 done
+
+[[ "$VERSION" != latest ]] || die "an immutable --version is required"
+[[ "$MANIFEST_SHA256" =~ ^sha256:[a-f0-9]{64}$ ]] \
+    || die "--manifest-sha256 must be sha256 followed by 64 lowercase hexadecimal characters"
 
 for tool in curl tar; do
     command -v "$tool" >/dev/null || die "$tool is required but not installed"
@@ -111,9 +116,43 @@ asset_url() {
     ' <<<"$RELEASE_JSON"
 }
 
+# Print the API asset URL for one exact release asset.
+named_asset_url() {
+    awk -v name="$1" '
+        BEGIN { RS = "," }
+        /"url"[[:space:]]*:[[:space:]]*"https:\/\/api\.github\.com\/[^\"]*\/releases\/assets\/[0-9]+"/ {
+            u = $0; sub(/.*"url"[[:space:]]*:[[:space:]]*"/, "", u); sub(/".*/, "", u)
+        }
+        $0 ~ ("\"name\"[[:space:]]*:[[:space:]]*\"" name "\"") { print u; exit }
+    ' <<<"$RELEASE_JSON"
+}
+
+download_asset() {
+    local url="$1" destination="$2"
+    curl -fL --progress-bar ${TOKEN:+--oauth2-bearer "$TOKEN"} \
+        -H "Accept: application/octet-stream" -o "$destination" "$url"
+}
+
+sha256_file() {
+    if command -v sha256sum >/dev/null; then
+        sha256sum "$1" | awk '{print $1}'
+    else
+        shasum -a 256 "$1" | awk '{print $1}'
+    fi
+}
+
+verify_archive() {
+    local archive="$1" name expected actual
+    name="$(basename "$archive")"
+    expected="$(awk -v name="$name" '$2 == name || $2 == "*" name { print $1; exit }' "$CHECKSUM_MANIFEST")"
+    [[ "$expected" =~ ^[a-f0-9]{64}$ ]] || die "signed manifest has no checksum for $name"
+    actual="$(sha256_file "$archive")"
+    [[ "$actual" == "$expected" ]] || die "checksum mismatch for $name"
+}
+
 # Download, unpack, and install <binary> into $INSTALL_DIR, replacing any existing copy.
 install_binary() {
-    local binary="$1" url
+    local binary="$1" url archive_name archive
     local bin_path="$INSTALL_DIR/$binary"
     url="$(asset_url "$binary")" || true
     [[ -n "$url" ]] || die "no $binary release found for $TRIPLE (repo=$REPO version=$VERSION)"
@@ -124,13 +163,15 @@ install_binary() {
         say "installing $binary"
     fi
 
-    curl -fL --progress-bar ${TOKEN:+--oauth2-bearer "$TOKEN"} \
-        -H "Accept: application/octet-stream" -o "$WORK/$binary.tar.gz" "$url"
+    archive_name="${binary}-${VERSION#v}-${TRIPLE}.tar.gz"
+    archive="$WORK/$archive_name"
+    download_asset "$url" "$archive"
+    verify_archive "$archive"
     # Extract into a per-binary dir and find the executable, so this works whether
     # the tarball holds the binary at its root or under a versioned subdirectory.
     local dest="$WORK/$binary.d"
     mkdir -p "$dest"
-    tar -xzf "$WORK/$binary.tar.gz" -C "$dest"
+    tar -xzf "$archive" -C "$dest"
     local extracted
     extracted="$(find "$dest" -type f -name "$binary" | head -n1)"
     [[ -n "$extracted" ]] || die "could not find $binary in the downloaded archive"
@@ -215,6 +256,13 @@ if ! RELEASE_JSON="$(fetch_release 2>&1)"; then
 $RELEASE_JSON
 hint: for a private repo set GITHUB_TOKEN or run 'gh auth login'"
 fi
+
+CHECKSUM_MANIFEST="$WORK/SHA256SUMS"
+MANIFEST_URL="$(named_asset_url SHA256SUMS)" || true
+[[ -n "$MANIFEST_URL" ]] || die "release has no SHA256SUMS asset"
+download_asset "$MANIFEST_URL" "$CHECKSUM_MANIFEST"
+[[ "sha256:$(sha256_file "$CHECKSUM_MANIFEST")" == "$MANIFEST_SHA256" ]] \
+    || die "SHA256SUMS does not match the trusted manifest digest"
 
 if [[ "$DEMO" == 1 ]]; then
     PRIOR_LORE="$(command -v lore || true)"

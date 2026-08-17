@@ -22,7 +22,7 @@ only for reviewing and rebasing future upstream changes.
 From a clean checkout on the release branch, run:
 
 ```bash
-scripts/release-local.sh v0.8.4-portals.1
+scripts/release-local.sh v0.8.4-portals.2
 ```
 
 The gate verifies that the tag matches the workspace version, builds `lore`
@@ -35,7 +35,7 @@ push a tag. It fetches `origin`, requires the matching base branch (for example
 After reviewing the result, publish explicitly:
 
 ```bash
-scripts/release-local.sh v0.8.4-portals.1 --publish
+scripts/release-local.sh v0.8.4-portals.2 --publish
 ```
 
 Publishing reruns every gate, pushes the current branch, creates a new
@@ -49,7 +49,7 @@ When the workflow finishes, promote the release from the parent repository:
 
 ```bash
 infra/pulumi/scripts/verify-and-promote-lore-client-release.sh \
-  v0.8.4-portals.1
+  v0.8.4-portals.2
 ```
 
 That verification is the only supported way to populate the Lore client
@@ -59,6 +59,11 @@ automatically. Commit the resulting parent gitlink and release
 bill-of-materials update together. Then update Nap's pinned Lore version and
 provenance, run Nap's local and cloud integration suites, and publish a new Nap
 release.
+
+Nap passes the pinned `SHA256SUMS` digest to the release installer. The
+installer must reject a missing or mismatched manifest and must verify each
+downloaded archive before extraction. This makes the signed manifest a runtime
+trust anchor instead of release metadata that is merely recorded.
 
 ## Required checks
 
