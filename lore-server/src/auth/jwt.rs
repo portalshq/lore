@@ -51,7 +51,7 @@ impl ResourcePermission {
     }
 
     pub fn matches_repository(&self, repository_id: &String) -> bool {
-        self.resource_id == *repository_id || self.is_wildcard_resource()
+        self.resource_id == *repository_id
     }
 }
 
@@ -88,6 +88,12 @@ pub enum JwtVerifierError {
     ValidationFailed(#[from] jsonwebtoken::errors::Error),
     #[error("JWT authorization failed")]
     NotAuthorized,
+    #[error("JWT algorithm is not permitted")]
+    AlgorithmNotAllowed,
+    #[error("JWT environment does not match this server")]
+    EnvironmentMismatch,
+    #[error("JWT is missing a mandatory audience")]
+    AudienceMismatch,
 }
 
 #[derive(Clone)]
@@ -95,18 +101,30 @@ pub struct JwtVerifier {
     pub jwk_service: Arc<dyn JWKService>,
     pub jwt_issuer: Option<String>,
     pub jwt_audience: Option<Vec<String>>,
+    pub algorithm: jsonwebtoken::Algorithm,
+    pub required_environment: Option<String>,
 }
 
 impl JwtVerifier {
     pub async fn verify_token(&self, token: &str) -> Result<AuthorizationToken, JwtVerifierError> {
         let header = decode_header(token).map_err(JwtVerifierError::ValidationFailed)?;
-        let kid = header.kid.ok_or(JwtVerifierError::HeaderKIDMissing)?;
+        if header.alg != self.algorithm {
+            return Err(JwtVerifierError::AlgorithmNotAllowed);
+        }
+        let kid = header
+            .kid
+            .filter(|kid| !kid.trim().is_empty())
+            .ok_or(JwtVerifierError::HeaderKIDMissing)?;
 
         let (key, alg) = self
             .jwk_service
             .get_key(&kid)
             .await
             .map_err(JwtVerifierError::KeyNotFound)?;
+
+        if alg != self.algorithm {
+            return Err(JwtVerifierError::AlgorithmNotAllowed);
+        }
 
         self.verify_token_internal(token, &key, &alg)
     }
@@ -129,9 +147,11 @@ impl JwtVerifier {
 
         debug!("Decoding JWT token");
 
-        if let Ok(token_data) = decode::<AuthorizationToken>(token, key, &validation) {
+        let authorization = if let Ok(token_data) =
+            decode::<AuthorizationToken>(token, key, &validation)
+        {
             debug!("Decoded user info: {:?}", token_data.claims);
-            Ok(token_data.claims)
+            token_data.claims
         } else {
             let token_data = decode::<JWTUserInfo>(token, key, &validation).map_err(|error| {
                 if matches!(
@@ -146,7 +166,7 @@ impl JwtVerifier {
             })?;
 
             let token = token_data.claims;
-            Ok(AuthorizationToken {
+            AuthorizationToken {
                 user_id: token.user_id,
                 issuer: token.issuer,
                 issued_at: token.issued_at,
@@ -159,8 +179,30 @@ impl JwtVerifier {
                 groups: None,
                 is_service_account: token.is_service_account,
                 idp: String::default(),
-            })
+            }
+        };
+
+        if self
+            .required_environment
+            .as_ref()
+            .is_some_and(|environment| authorization.env != *environment)
+        {
+            return Err(JwtVerifierError::EnvironmentMismatch);
         }
+        if let Some(required) = self.jwt_audience.as_ref() {
+            for mandatory in ["lore", "portals.sh"] {
+                if required.iter().any(|audience| audience == mandatory)
+                    && !authorization
+                        .audience
+                        .iter()
+                        .any(|audience| audience == mandatory)
+                {
+                    return Err(JwtVerifierError::AudienceMismatch);
+                }
+            }
+        }
+
+        Ok(authorization)
     }
 }
 
@@ -168,10 +210,16 @@ pub fn verify_authorization(
     authorization: &AuthorizationToken,
     repository: lore_revision::lore::RepositoryId,
 ) -> Result<(), JwtVerifierError> {
-    if let Some(resources) = authorization.resources.as_ref() {
+    if let Some(resources) = authorization.resources.as_ref()
+        && resources.len() == 1
+    {
         let checked_repository = format!("urc-{repository}");
         for authorized_resource in resources.iter() {
-            if authorized_resource.matches_repository(&checked_repository) {
+            let has_data_permission = authorized_resource
+                .permission
+                .iter()
+                .any(|permission| permission == "read" || permission == "write");
+            if has_data_permission && authorized_resource.matches_repository(&checked_repository) {
                 return Ok(());
             }
         }
@@ -217,8 +265,8 @@ mod tests {
             permission: vec![],
             resource_id: test_repository_id.clone(),
         };
-        assert!(wildcard_resource_permission.matches_repository(&test_repository_id));
-        assert!(wildcard_resource_permission.matches_repository(&unrelated_repository_id));
+        assert!(!wildcard_resource_permission.matches_repository(&test_repository_id));
+        assert!(!wildcard_resource_permission.matches_repository(&unrelated_repository_id));
         assert!(regular_resource_permission.matches_repository(&test_repository_id));
         assert!(!regular_resource_permission.matches_repository(&unrelated_repository_id));
     }
@@ -227,7 +275,7 @@ mod tests {
     fn verify_authorization_allows_repo_from_token() {
         let allowed_repository_id = "urc-0194b726b34e72b0b45550b88a967076".to_string();
         let resource_permission = ResourcePermission {
-            permission: vec![],
+            permission: vec!["write".to_string()],
             resource_id: allowed_repository_id.clone(),
         };
         let authorization_token = AuthorizationToken {
@@ -257,9 +305,9 @@ mod tests {
     }
 
     #[test]
-    fn verify_authorization_allows_all_repos_for_wildcard_token() {
+    fn verify_authorization_rejects_wildcard_token() {
         let resource_permission = ResourcePermission {
-            permission: vec![],
+            permission: vec!["write".to_string()],
             resource_id: "urc-*".to_string(),
         };
         let wildcard_authorization_token = AuthorizationToken {
@@ -290,8 +338,34 @@ mod tests {
 
         for context in test_contexts {
             verify_authorization(&wildcard_authorization_token, context)
-                .expect("verify auth failed");
+                .expect_err("wildcard authorization must be rejected");
         }
+    }
+
+    #[test]
+    fn verify_authorization_requires_a_known_permission() {
+        let resource_permission = ResourcePermission {
+            permission: vec!["admin".to_string()],
+            resource_id: "urc-0194b726b34e72b0b45550b88a967076".to_string(),
+        };
+        let token = AuthorizationToken {
+            audience: vec!["lore".to_string()],
+            env: "test".to_string(),
+            expires: 1234,
+            user_id: "test".to_string(),
+            idp: "test".to_string(),
+            issuer: "test".to_string(),
+            name: "test".to_string(),
+            preferred_username: "test".to_string(),
+            groups: None,
+            is_service_account: Some(false),
+            issued_at: 123,
+            resources: Some(vec![resource_permission]),
+        };
+        let context: RepositoryId = Context::from_str("0194b726b34e72b0b45550b88a967076")
+            .unwrap()
+            .into();
+        verify_authorization(&token, context).expect_err("unknown permission must be rejected");
     }
 
     mod jwt_verifier {
@@ -406,6 +480,8 @@ mod tests {
                 jwk_service: Arc::new(service),
                 jwt_issuer: None,
                 jwt_audience: Some(vec!["urc.example.com".to_string(), "URC_test".to_string()]),
+                algorithm: AGREED_UPON_ALGORITHM,
+                required_environment: None,
             };
 
             let authn_string_audience = json!({
@@ -445,6 +521,8 @@ mod tests {
                 jwk_service: Arc::new(service),
                 jwt_issuer: None,
                 jwt_audience: Some(vec!["urc.example.com".to_string(), "URC_test".to_string()]),
+                algorithm: AGREED_UPON_ALGORITHM,
+                required_environment: None,
             };
 
             let base_authz_token = mock_authz_token(vec!["URC_test".to_string()]);
@@ -481,6 +559,8 @@ mod tests {
                 jwk_service: Arc::new(service),
                 jwt_issuer: None,
                 jwt_audience: Some(vec!["urc.example.com".to_string(), "Lore".to_string()]),
+                algorithm: AGREED_UPON_ALGORITHM,
+                required_environment: None,
             };
             let (original_authz_token, encoded_authz_token) =
                 make_authz_token_with_audience(vec!["Lore".to_string()]);
@@ -515,6 +595,8 @@ mod tests {
                 jwk_service: Arc::new(service),
                 jwt_issuer: None,
                 jwt_audience: Some(common_audience.clone()),
+                algorithm: AGREED_UPON_ALGORITHM,
+                required_environment: None,
             };
 
             let (original_token, encoded_token) = make_authz_token_with_audience(common_audience);
@@ -540,6 +622,8 @@ mod tests {
                 jwk_service: Arc::new(service),
                 jwt_issuer: None,
                 jwt_audience: Some(vec!["Lore".to_string()]),
+                algorithm: AGREED_UPON_ALGORITHM,
+                required_environment: None,
             };
 
             let (original_token, encoded_token) = make_authz_token_with_audience(vec![
@@ -567,6 +651,8 @@ mod tests {
                 jwk_service: Arc::new(service),
                 jwt_issuer: None,
                 jwt_audience: Some(vec!["skein".to_string()]),
+                algorithm: AGREED_UPON_ALGORITHM,
+                required_environment: None,
             };
 
             let (_, encoded_token) = make_authz_token_with_audience(vec!["Lore".to_string()]);
@@ -577,6 +663,31 @@ mod tests {
                 JwtVerifierError::ValidationFailed(_)
             ));
 
+            Ok(())
+        }
+
+        #[tokio::test]
+        async fn production_contract_requires_both_mandatory_audiences()
+        -> Result<(), Box<dyn Error>> {
+            let mut service = MockTestJWKService::new();
+            service.expect_get_key().return_once(|_| {
+                Ok((
+                    DecodingKey::from_secret(AGREED_UPON_SIGNING_SECRET.as_ref()),
+                    AGREED_UPON_ALGORITHM,
+                ))
+            });
+            let verifier = JwtVerifier {
+                jwk_service: Arc::new(service),
+                jwt_issuer: Some("the issuer".to_string()),
+                jwt_audience: Some(vec!["lore".to_string(), "portals.sh".to_string()]),
+                algorithm: AGREED_UPON_ALGORITHM,
+                required_environment: Some("the env".to_string()),
+            };
+            let (_, encoded) = make_authz_token_with_audience(vec!["lore".to_string()]);
+            assert!(matches!(
+                verifier.verify_token(&encoded).await,
+                Err(JwtVerifierError::AudienceMismatch)
+            ));
             Ok(())
         }
     }

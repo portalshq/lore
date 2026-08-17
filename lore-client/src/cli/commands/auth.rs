@@ -52,6 +52,9 @@ pub struct AuthLoginArgs {
     /// Token value for non-interactive login (requires --token-type)
     #[clap(long = "token")]
     token: Option<String>,
+    /// Read the non-interactive token from stdin so it never appears in argv.
+    #[clap(long = "token-stdin", conflicts_with = "token")]
+    token_stdin: bool,
     /// Auth service URL with scheme (e.g. `ucs-auth://auth.example.com`).
     /// Required when logging in with `--token` outside a repository without a remote-url.
     #[clap(long = "auth-url")]
@@ -140,7 +143,24 @@ pub fn handle_login_command(globals: LoreGlobalArgs, args: &AuthLoginArgs) -> u8
             .with_defaults(),
     ));
 
-    if let (Some(token_type), Some(token)) = (args.token_type.as_deref(), args.token.as_deref()) {
+    let token_from_stdin = if args.token_stdin {
+        let mut token = String::new();
+        if let Err(error) = std::io::Read::read_to_string(&mut std::io::stdin(), &mut token) {
+            crate::eprintln!("Failed to read authentication token from stdin: {error}");
+            return 1;
+        }
+        let token = token.trim().to_string();
+        if token.is_empty() {
+            crate::eprintln!("Authentication token read from stdin is empty");
+            return 1;
+        }
+        Some(token)
+    } else {
+        None
+    };
+    let token = args.token.as_deref().or(token_from_stdin.as_deref());
+
+    if let (Some(token_type), Some(token)) = (args.token_type.as_deref(), token) {
         let args = LoreAuthLoginWithTokenArgs {
             remote_url,
             token: token.into(),
@@ -148,8 +168,10 @@ pub fn handle_login_command(globals: LoreGlobalArgs, args: &AuthLoginArgs) -> u8
             auth_url: args.auth_url.as_deref().into(),
         };
         runtime().block_on(auth::login_with_token(globals, args, callback)) as u8
-    } else if args.token_type.is_some() || args.token.is_some() {
-        crate::eprintln!("Both --token-type and --token are required for non-interactive login");
+    } else if args.token_type.is_some() || args.token.is_some() || args.token_stdin {
+        crate::eprintln!(
+            "--token-type and exactly one of --token or --token-stdin are required for non-interactive login"
+        );
         1
     } else {
         let args = LoreAuthLoginInteractiveArgs {

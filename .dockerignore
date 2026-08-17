@@ -1,2 +1,3 @@
 target/
 **/target/
+lore-server/src/protocol/test_data/*key.pem

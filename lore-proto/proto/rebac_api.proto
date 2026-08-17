@@ -5,6 +5,8 @@ package ucs.auth;
 service RebacApi {
   rpc CreateResource(CreateResourceRequest) returns (CreateResourceResponse) {};
   rpc DeleteResource(DeleteResourceRequest) returns (DeleteResourceResponse) {};
+  rpc ConfirmResourceDeleted(ConfirmResourceDeletedRequest)
+      returns (ConfirmResourceDeletedResponse) {};
 }
 
 // Messages for requests/responses
@@ -17,3 +19,6 @@ message CreateResourceResponse {}
 
 message DeleteResourceRequest { string resource_id = 1; }
 message DeleteResourceResponse {}
+
+message ConfirmResourceDeletedRequest { string resource_id = 1; }
+message ConfirmResourceDeletedResponse {}

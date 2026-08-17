@@ -33,6 +33,7 @@ pub struct LoreAdminService {
     notification: Arc<dyn NotificationSender>,
     hook_dispatcher: Arc<HookDispatcher>,
     rpc_timeout: Duration,
+    enabled: bool,
 }
 
 impl LoreAdminService {
@@ -85,6 +86,7 @@ impl LoreAdminService {
             notification,
             hook_dispatcher,
             rpc_timeout: Duration::from_secs(60),
+            enabled: true,
         }
     }
 
@@ -100,6 +102,18 @@ impl LoreAdminService {
     pub fn set_rpc_timeout(&mut self, rpc_timeout: Duration) {
         self.rpc_timeout = rpc_timeout;
     }
+
+    pub fn set_enabled(&mut self, enabled: bool) {
+        self.enabled = enabled;
+    }
+
+    fn require_enabled(&self) -> Result<(), Status> {
+        if self.enabled {
+            Ok(())
+        } else {
+            Err(Status::unimplemented("AdminService is disabled"))
+        }
+    }
 }
 
 #[tonic::async_trait]
@@ -109,6 +123,7 @@ impl AdminService for LoreAdminService {
         &self,
         _request: Request<ServerInfoRequest>,
     ) -> Result<Response<ServerInfoResponse>, Status> {
+        self.require_enabled()?;
         info!("Request for ServerInfo");
 
         Ok(Response::new(self.server_info.clone()))
@@ -118,6 +133,7 @@ impl AdminService for LoreAdminService {
         &self,
         request: Request<lore_proto::ObliterateRequest>,
     ) -> Result<Response<lore_proto::ObliterateResponse>, Status> {
+        self.require_enabled()?;
         timeout_grpc(
             self.rpc_timeout,
             obliterate::handler(
@@ -130,5 +146,33 @@ impl AdminService for LoreAdminService {
             ),
         )
         .await
+    }
+}
+
+#[cfg(test)]
+mod security_tests {
+    use super::*;
+    use crate::notification::testing::MockNotificationSender;
+    use crate::store::test_store_create;
+    use tonic::Code;
+
+    #[tokio::test]
+    async fn disabled_admin_service_returns_unimplemented_before_store_access() {
+        let (immutable, mutable, _) = test_store_create().await.expect("test stores");
+        let mut service = LoreAdminService::new(
+            HashMap::new(),
+            Vec::new(),
+            immutable,
+            mutable,
+            Arc::new(MockNotificationSender::new()),
+            Arc::new(HookDispatcher::empty()),
+        );
+        service.set_enabled(false);
+
+        let error = service
+            .server_info(Request::new(ServerInfoRequest {}))
+            .await
+            .expect_err("disabled AdminService must fail");
+        assert_eq!(error.code(), Code::Unimplemented);
     }
 }

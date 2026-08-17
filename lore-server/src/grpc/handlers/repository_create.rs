@@ -58,6 +58,15 @@ pub async fn handler(
         .map(|s| s.to_string());
     let req = request.into_inner();
 
+    // Never allow a network caller to select the audit/ownership subject.
+    // Caller-provided creator values remain available only in local profiles
+    // where no external Auth service is configured.
+    let creator = if auth_url.is_some() || req.creator.is_empty() {
+        user_id.clone()
+    } else {
+        req.creator.clone()
+    };
+
     let id: RepositoryId = Context::from(req.id).into();
 
     let execution = setup_execution(module_path!(), correlation_id.clone(), user_id.clone());
@@ -89,7 +98,7 @@ pub async fn handler(
                 req.description.as_str(),
                 default_branch_id,
                 req.default_branch_name.as_str(),
-                req.creator.as_str(),
+                creator.as_str(),
                 req.created,
                 auth_url,
                 authorization,
@@ -189,6 +198,21 @@ async fn repository_create(
                 repository.id, data.name
             );
 
+            if auth_url.is_some() {
+                let stored_metadata = repository::metadata(repository.clone(), data.metadata)
+                    .await
+                    .warn_map_err(|err| {
+                        Status::internal(format!(
+                            "Failed to load existing repository metadata: {err}"
+                        ))
+                    })?;
+                if stored_metadata.creator != creator {
+                    return Err(Status::permission_denied(
+                        "Repository is owned by another subject",
+                    ));
+                }
+            }
+
             // Make sure name -> ID mapping exist
             if repository_query_name(
                 repository.clone(),
@@ -206,6 +230,15 @@ async fn repository_create(
                 let _ = repository::store_name_to_id(repository.clone(), name, repository.id)
                     .await
                     .inspect_err(|err| info!("Recreate name -> ID mapping failed: {err}"));
+            }
+
+            // A previous attempt may have completed storage but failed while
+            // persisting the owner relationship. Re-run the idempotent ReBAC
+            // write before reporting success.
+            if let Some(auth_url) = auth_url.as_ref() {
+                let client = Box::new(grpc_get_rebac_client(auth_url.clone()).await?);
+                repository_create_auth_resource(client, authorization.clone(), repository.id, name)
+                    .await?;
             }
 
             Ok(data)
@@ -229,6 +262,25 @@ async fn repository_create(
                 "Repository {} already exist with id {}, early out create successful",
                 name, data.id
             );
+            if auth_url.is_some() {
+                let stored_metadata = repository::metadata(repository.clone(), data.metadata)
+                    .await
+                    .warn_map_err(|err| {
+                        Status::internal(format!(
+                            "Failed to load existing repository metadata: {err}"
+                        ))
+                    })?;
+                if stored_metadata.creator != creator {
+                    return Err(Status::permission_denied(
+                        "Repository is owned by another subject",
+                    ));
+                }
+            }
+            if let Some(auth_url) = auth_url.as_ref() {
+                let client = Box::new(grpc_get_rebac_client(auth_url.clone()).await?);
+                repository_create_auth_resource(client, authorization.clone(), repository.id, name)
+                    .await?;
+            }
             Ok(data)
         } else {
             Err(Status::already_exists(format!(
@@ -236,11 +288,6 @@ async fn repository_create(
                 name, data.id, repository.id
             )))
         };
-    }
-
-    if let Some(auth_url) = auth_url {
-        let client = Box::new(grpc_get_rebac_client(auth_url).await?);
-        repository_create_auth_resource(client, authorization, repository.id, name).await?;
     }
 
     // Set up the repository metadata
@@ -308,6 +355,14 @@ async fn repository_create(
                 repository.id
             ))
         })?;
+
+    // Persist the owner relationship only after the repository is durable.
+    // If this call fails the client receives an error; a retry takes either
+    // early-return path above and repairs the missing relationship.
+    if let Some(auth_url) = auth_url {
+        let client = Box::new(grpc_get_rebac_client(auth_url).await?);
+        repository_create_auth_resource(client, authorization, repository.id, name).await?;
+    }
 
     info!("Created repository {} with ID {}", name, repository.id);
 
@@ -446,6 +501,8 @@ mod tests {
     }
 
     mod repository_create_auth_resource_tests {
+        use lore_proto::rebac::ConfirmResourceDeletedRequest;
+        use lore_proto::rebac::ConfirmResourceDeletedResponse;
         use lore_proto::rebac::CreateResourceResponse;
         use lore_proto::rebac::DeleteResourceRequest;
         use lore_proto::rebac::DeleteResourceResponse;
@@ -468,6 +525,11 @@ mod tests {
                     &mut self,
                     request: Request<DeleteResourceRequest>,
                 ) -> RebacApiResult<DeleteResourceResponse>;
+
+                async fn confirm_resource_deleted(
+                    &mut self,
+                    request: Request<ConfirmResourceDeletedRequest>,
+                ) -> RebacApiResult<ConfirmResourceDeletedResponse>;
             }
         }
 

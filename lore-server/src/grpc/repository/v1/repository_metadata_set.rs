@@ -9,6 +9,7 @@ use lore_base::types::Hash;
 use lore_base::types::KeyType;
 use lore_proto::lore::repository::v1::RepositoryMetadataSetRequest;
 use lore_proto::lore::repository::v1::RepositoryMetadataSetResponse;
+use lore_revision::lore::RepositoryId;
 use lore_revision::metadata::Metadata;
 use lore_revision::metadata::MetadataType;
 use lore_revision::metadata::repository::READ_ONLY_KEYS;
@@ -19,7 +20,9 @@ use tonic::Request;
 use tonic::Response;
 use tonic::Status;
 
+use crate::auth::jwt::verify_authorization;
 use crate::grpc::extract_correlation_id;
+use crate::grpc::get_authorization;
 use crate::grpc::get_user_id;
 use crate::grpc::get_write_token;
 use crate::grpc::warn_error_to_status;
@@ -43,13 +46,17 @@ pub async fn handler(
     mutable_store: Arc<dyn lore_storage::MutableStore>,
 ) -> Result<Response<RepositoryMetadataSetResponse>, Status> {
     let user_id = get_user_id(request.extensions());
+    let authorization = get_authorization(request.extensions())?;
     let correlation_id = extract_correlation_id(&request).unwrap_or_default();
     let req = request.into_inner();
 
-    let repository_id: Context = req.id.into();
-    if repository_id == Context::default() {
+    let repository_context: Context = req.id.into();
+    if repository_context == Context::default() {
         return Err(Status::invalid_argument("Missing repository id"));
     }
+    let repository_id: RepositoryId = repository_context.into();
+    verify_authorization(&authorization, repository_id)
+        .map_err(|_| Status::permission_denied("Repository access denied"))?;
 
     let expected: Hash = req.expected.into();
     let updated: Hash = req.updated.into();
@@ -58,7 +65,7 @@ pub async fn handler(
     let repository = Arc::new(RepositoryContext::new_server_context(
         immutable_store,
         mutable_store,
-        repository_id.into(),
+        repository_id,
     ));
 
     LORE_CONTEXT
@@ -93,13 +100,13 @@ pub async fn handler(
             let metadata_key = hash::hash_function_arg(
                 repository::SALT_LORE,
                 repository::METADATA,
-                hex::encode(repository_id.data()).as_str(),
+                hex::encode(repository_context.data()).as_str(),
             );
             let write_token = get_write_token();
             let previous = repository
                 .write_mutable_store(&write_token)
                 .compare_and_swap(
-                    repository_id.into(),
+                    repository_id,
                     metadata_key,
                     expected,
                     updated,

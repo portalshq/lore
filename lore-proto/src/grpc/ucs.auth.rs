@@ -15,6 +15,13 @@ pub struct DeleteResourceRequest {
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct DeleteResourceResponse {}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ConfirmResourceDeletedRequest {
+    #[prost(string, tag = "1")]
+    pub resource_id: ::prost::alloc::string::String,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ConfirmResourceDeletedResponse {}
 /// Generated client implementations.
 pub mod rebac_api_client {
     #![allow(
@@ -152,6 +159,30 @@ pub mod rebac_api_client {
             let mut req = request.into_request();
             req.extensions_mut()
                 .insert(GrpcMethod::new("ucs.auth.RebacApi", "DeleteResource"));
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn confirm_resource_deleted(
+            &mut self,
+            request: impl tonic::IntoRequest<super::ConfirmResourceDeletedRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ConfirmResourceDeletedResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/ucs.auth.RebacApi/ConfirmResourceDeleted",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("ucs.auth.RebacApi", "ConfirmResourceDeleted"));
             self.inner.unary(req, path, codec).await
         }
     }

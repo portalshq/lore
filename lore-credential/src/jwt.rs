@@ -99,9 +99,32 @@ pub fn user_info_from_token(token: String) -> Option<UserInfo> {
 pub enum JwtUsageError {}
 
 pub fn domain_in_root_domains(domain: &str, root_domains: &[String]) -> bool {
-    root_domains
-        .iter()
-        .any(|acceptable_root| domain.ends_with(acceptable_root))
+    let Some(domain) = normalized_domain(domain) else {
+        return false;
+    };
+    root_domains.iter().any(|acceptable_root| {
+        let Some(root) = normalized_domain(acceptable_root) else {
+            return false;
+        };
+        domain == root || domain.ends_with(&format!(".{root}"))
+    })
+}
+
+fn normalized_domain(value: &str) -> Option<String> {
+    let value = value.trim();
+    if value.is_empty() {
+        return None;
+    }
+    let host = url::Url::parse(value)
+        .ok()
+        .and_then(|url| url.host_str().map(ToOwned::to_owned))
+        .unwrap_or_else(|| value.to_owned());
+    let host = host.trim_end_matches('.').to_ascii_lowercase();
+    match url::Host::parse(&host).ok()? {
+        url::Host::Domain(domain) => Some(domain.trim_end_matches('.').to_ascii_lowercase()),
+        url::Host::Ipv4(address) => Some(address.to_string()),
+        url::Host::Ipv6(address) => Some(address.to_string()),
+    }
 }
 
 pub fn verify_jwt_usage_for_remote(
@@ -119,4 +142,24 @@ pub fn verify_jwt_usage_for_remote(
     Err(JwtUsageError::internal(format!(
         "JWT 'aud' does not specify remote domain '{remote_domain}'"
     )))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::domain_in_root_domains;
+
+    #[test]
+    fn recipient_domain_requires_a_label_boundary() {
+        let roots = vec!["portals.sh".to_string()];
+        assert!(domain_in_root_domains("portals.sh", &roots));
+        assert!(domain_in_root_domains("lore.portals.sh", &roots));
+        assert!(!domain_in_root_domains("evilportals.sh", &roots));
+        assert!(!domain_in_root_domains("portals.sh.evil.example", &roots));
+    }
+
+    #[test]
+    fn recipient_domain_normalizes_urls_case_and_trailing_dot() {
+        let roots = vec!["https://PORTALS.sh/issuer".to_string()];
+        assert!(domain_in_root_domains("Lore.Portals.SH.", &roots));
+    }
 }
