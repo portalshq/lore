@@ -19,7 +19,10 @@ only for reviewing and rebasing future upstream changes.
 
 ## Local release gate
 
-From a clean checkout on the release branch, run:
+Bump the version with `scripts/bump-release.sh vX.Y.Z-portals.N`, which
+updates `Cargo.toml`, `lore-capi/lore.h`, and `Cargo.lock` together; commit
+everything it produces. Then, from a clean checkout on the release branch,
+run:
 
 ```bash
 scripts/release-local.sh v0.8.4-portals.2
