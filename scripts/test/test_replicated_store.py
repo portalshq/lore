@@ -3,7 +3,6 @@
 # SPDX-License-Identifier: MIT
 import json
 import logging
-import os
 import uuid
 
 import pytest
@@ -73,11 +72,10 @@ class TestReplicatedStore:
         server_2_env["LORE__IMMUTABLE_STORE__MODE"] = "replicated"
         server_2_env["LORE__SERVER__GRPC_INTERNAL__ENABLED"] = "false"
 
-        # Override the replicated-store settings via local.toml. The server no
-        # longer reads default.toml from disk (it is baked into the binary), so
-        # local.toml is the override file that gets loaded, layered last.
+        # Extend this server's isolated GHA config. Hardened non-local
+        # environments intentionally ignore local.toml.
         with open(
-            os.path.join(new_server_root, "lore-server", "config", "local.toml"),
+            new_server_root / "lore-server" / "config" / "gha.toml",
             "a",
             encoding="utf-8",
         ) as server_2_config:

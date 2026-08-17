@@ -240,7 +240,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn resource_permission_matches_wildcard_resource() {
+    fn resource_permission_detects_wildcard_resource() {
         let wildcard_resource_permission = ResourcePermission {
             permission: vec![],
             resource_id: "urc-*".to_string(),

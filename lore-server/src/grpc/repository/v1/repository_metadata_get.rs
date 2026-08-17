@@ -31,7 +31,7 @@ pub async fn handler(
     mutable_store: Arc<dyn lore_storage::MutableStore>,
 ) -> Result<Response<RepositoryMetadataGetResponse>, Status> {
     let user_id = get_user_id(request.extensions());
-    let authorization = get_authorization(request.extensions())?;
+    let authorization = get_authorization(request.extensions()).ok();
     let correlation_id = extract_correlation_id(&request).unwrap_or_default();
     let req = request.into_inner();
 
@@ -40,8 +40,10 @@ pub async fn handler(
         return Err(Status::invalid_argument("Missing repository id"));
     }
     let repository_id: RepositoryId = repository_id.into();
-    verify_authorization(&authorization, repository_id)
-        .map_err(|_| Status::permission_denied("Repository access denied"))?;
+    if let Some(authorization) = authorization {
+        verify_authorization(&authorization, repository_id)
+            .map_err(|_| Status::permission_denied("Repository access denied"))?;
+    }
 
     let execution = setup_execution(module_path!(), correlation_id, user_id);
     let repository = Arc::new(RepositoryContext::new_server_context(

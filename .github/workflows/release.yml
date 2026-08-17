@@ -1,0 +1,150 @@
+# SPDX-FileCopyrightText: 2026 Digital Creations
+# SPDX-License-Identifier: MIT
+
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*-portals.*"
+
+permissions: {}
+
+jobs:
+  test:
+    name: Test release source
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.13"
+      - name: Install build tools
+        run: |
+          rustup toolchain install stable --profile minimal
+          python -m pip install uv==0.10.12
+      - name: Verify tag and build release binaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="$(sed -n 's/^version = "\([^"]*\)"$/\1/p' Cargo.toml | head -n 1)"
+          test "${GITHUB_REF_NAME}" = "v${VERSION}"
+          CARGO_INCREMENTAL=0 cargo build --locked --release \
+            -p lore-client --bin lore \
+            -p lore-server --bin loreserver
+      - name: Run Rust tests
+        run: >-
+          cargo test --locked --release
+          -p lore-credential
+          -p lore-server
+      - name: Run CLI/server integration tests
+        env:
+          LORE_SMOKE_BATCH_SIZE: "8"
+        run: scripts/run-smoke-tests.sh
+
+  build:
+    name: Build ${{ matrix.target }}
+    needs: test
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+          - os: macos-15
+            target: aarch64-apple-darwin
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+          - os: windows-11-arm
+            target: aarch64-pc-windows-msvc
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - name: Install Rust target
+        shell: bash
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup target add "${{ matrix.target }}"
+      - name: Build Lore binaries
+        shell: bash
+        run: >-
+          cargo build --locked --profile release-lto
+          --target "${{ matrix.target }}"
+          -p lore-client --bin lore
+          -p lore-server --bin loreserver
+      - name: Package Unix artifacts
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          mkdir -p artifacts package/lore package/loreserver
+          cp "target/${{ matrix.target }}/release-lto/lore" package/lore/lore
+          cp "target/${{ matrix.target }}/release-lto/loreserver" package/loreserver/loreserver
+          tar -C package/lore -czf "artifacts/lore-${VERSION}-${{ matrix.target }}.tar.gz" lore
+          tar -C package/loreserver -czf "artifacts/loreserver-${VERSION}-${{ matrix.target }}.tar.gz" loreserver
+      - name: Package Windows artifacts
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $Version = $env:GITHUB_REF_NAME.Substring(1)
+          New-Item -ItemType Directory -Force artifacts | Out-Null
+          Compress-Archive `
+            -Path "target/${{ matrix.target }}/release-lto/lore.exe" `
+            -DestinationPath "artifacts/lore-$Version-${{ matrix.target }}.zip"
+          Compress-Archive `
+            -Path "target/${{ matrix.target }}/release-lto/loreserver.exe" `
+            -DestinationPath "artifacts/loreserver-$Version-${{ matrix.target }}.zip"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: lore-${{ matrix.target }}
+          path: artifacts/*
+          if-no-files-found: error
+
+  release:
+    name: Sign and publish
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          path: artifacts
+          merge-multiple: true
+      - name: Add installers and checksums
+        run: |
+          cp scripts/install.sh scripts/install.ps1 artifacts/
+          chmod +x artifacts/install.sh
+          cd artifacts
+          sha256sum lore-* loreserver-* install.sh install.ps1 > SHA256SUMS
+      - uses: sigstore/cosign-installer@f713795cb21599bc4e5c4b58cbad1da852d7eeb9 # v3
+      - name: Sign checksum manifest
+        working-directory: artifacts
+        run: cosign sign-blob --yes --bundle SHA256SUMS.sigstore.json SHA256SUMS
+      - name: Create immutable GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          gh release create "${GITHUB_REF_NAME}"
+          artifacts/*
+          --repo "${GITHUB_REPOSITORY}"
+          --verify-tag
+          --generate-notes
+          --title "${GITHUB_REF_NAME}"

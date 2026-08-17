@@ -514,7 +514,7 @@ mod tests {
     }
 
     #[test]
-    fn get_matching_permissions_includes_wildcard_resource() {
+    fn get_matching_permissions_rejects_wildcard_resource() {
         let mut extensions = Extensions::new();
         let test_repository_id = "urc-0194b726b34e72b0b45550b88a967076".to_string();
         let unrelated_repository_id = "urc-0192ae48ccf17060bc1ba9d04f6acb2f".to_string();
@@ -546,17 +546,8 @@ mod tests {
         let matched_resources = get_matching_permissions(&extensions, test_repository_context);
         let no_matched_resources =
             get_matching_permissions(&extensions, test_unrelated_repository_context);
-        assert_eq!(
-            matched_resources,
-            vec![
-                test_resource_permission,
-                test_wildcard_resource_permission.clone()
-            ]
-        );
-        assert_eq!(
-            no_matched_resources,
-            vec![test_wildcard_resource_permission]
-        );
+        assert_eq!(matched_resources, vec![test_resource_permission]);
+        assert_eq!(no_matched_resources, vec![]);
     }
 
     #[test]
@@ -619,7 +610,7 @@ mod tests {
     }
 
     #[test]
-    fn finds_existing_matching_permission_with_wildcard_repo() {
+    fn rejects_permission_from_wildcard_repo() {
         let mut extensions = Extensions::new();
         let test_repository_id = "urc-0194b726b34e72b0b45550b88a967076".to_string();
         let unrelated_repository_id = "urc-0192ae48ccf17060bc1ba9d04f6acb2f".to_string();
@@ -668,14 +659,14 @@ mod tests {
             test_repository_context,
             "unique_permission"
         ));
-        // user has test_wildcard_permission for a given repo — through the wildcard resource
-        assert!(has_required_permission(
+        // Wildcard resources never grant permissions, even for a repository
+        // that also has a separate exact resource entry.
+        assert!(!has_required_permission(
             &extensions,
             test_repository_context,
             "test_wildcard_permission"
         ));
-        // user also has test_permission for an unrelated repository — through the wildcard resource
-        assert!(has_required_permission(
+        assert!(!has_required_permission(
             &extensions,
             test_unrelated_repository_context,
             "test_permission"
@@ -724,7 +715,7 @@ mod tests {
     }
 
     #[test]
-    fn can_admin_lock_with_wildcard_permission_claim() {
+    fn wildcard_permission_cannot_admin_lock() {
         let mut extensions = Extensions::new();
         let test_repository_id = "urc-0194b726b34e72b0b45550b88a967076".to_string();
         let unrelated_repository_id = "urc-0192ae48ccf17060bc1ba9d04f6acb2f".to_string();
@@ -761,9 +752,8 @@ mod tests {
         // as user has "migrate" permission for a given repo, they CAN admin lock that repo
         assert!(can_admin_lock(&extensions, test_repository_context));
 
-        // user doesn't have direct "migrate" permission for an unrelated repo
-        // but they have a wildcard token with "migrate", so they should be able to admin lock arbitrary repo
-        assert!(can_admin_lock(
+        // A wildcard token cannot grant admin access to an unrelated repo.
+        assert!(!can_admin_lock(
             &extensions,
             test_unrelated_repository_context
         ));

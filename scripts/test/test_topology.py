@@ -108,9 +108,10 @@ class TestTopology:
         server_2_env[
             "LORE__IMMUTABLE_STORE__COMPOSITE__REPLICA_FACTORY__READ_REPLICAS_ENABLED"
         ] = "false"
-        # write a Stanza for topology
+        # Extend this server's isolated GHA config; non-local environments
+        # intentionally ignore local.toml.
         with open(
-            os.path.join(new_server_root, "lore-server", "config", "local.toml"),
+            os.path.join(new_server_root, "lore-server", "config", "gha.toml"),
             "a",
             encoding="utf-8",
         ) as server_2_config:
@@ -163,9 +164,10 @@ class TestTopology:
         server_3_env[
             "LORE__IMMUTABLE_STORE__COMPOSITE__REPLICA_FACTORY__READ_REPLICAS_ENABLED"
         ] = "true"
-        # write a Stanza for topology
+        # Extend this server's isolated GHA config; non-local environments
+        # intentionally ignore local.toml.
         with open(
-            os.path.join(new_server_root, "lore-server", "config", "local.toml"),
+            os.path.join(new_server_root, "lore-server", "config", "gha.toml"),
             "a",
             encoding="utf-8",
         ) as server_3_config:
@@ -529,7 +531,7 @@ class TestCompositeTopology:
         other_region_port = other_ports["internal"]
 
         with open(
-            os.path.join(new_server_root, "lore-server", "config", "local.toml"),
+            os.path.join(new_server_root, "lore-server", "config", "gha.toml"),
             "a",
             encoding="utf-8",
         ) as cfg:

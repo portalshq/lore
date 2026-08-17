@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: 2026 Epic Games, Inc.
 # SPDX-License-Identifier: MIT
 import logging
-import os
 import uuid
 
 import pytest
@@ -71,10 +70,10 @@ class TestForwardedBranchCreate:
     @pytest.fixture(scope="class")
     def server_2_config(self, request, tmp_path_factory, server_1_config):
         """
-        Config for Server 2: the delegation *source*. Its local.toml is extended
-        with the forwarded_requests block that tells it to forward BranchCreate
-        to Server 1's internal gRPC port. No certs are needed because Server 1's
-        internal listener runs without TLS in this test.
+        Config for Server 2: the delegation *source*. Its isolated process
+        environment configures forwarding to Server 1's internal gRPC port.
+        No certs are needed because Server 1's internal listener runs without
+        TLS in this test.
         """
         shared_port = allocate_free_port()
         ports = {
@@ -91,17 +90,14 @@ class TestForwardedBranchCreate:
         server_1_internal_port = server_1_env["LORE__SERVER__GRPC_INTERNAL__PORT"]
         server_hostname = request.config.getoption("--lore-server-hostname")
 
-        # Point Server 2's forwarded_requests client at Server 1's internal gRPC port
-        # and enable the branch_create delegation flag
-        with open(
-                os.path.join(server_root, "lore-server", "config", "local.toml"),
-                "a",
-                encoding="utf-8",
-        ) as f:
-            f.write("[server.grpc_public_services.forwarded_requests.client]\n")
-            f.write(f'url = "http://{server_hostname}:{server_1_internal_port}"\n')
-            f.write("[server.grpc_public_services.forwarded_requests.enabled_rpcs]\n")
-            f.write("revision_branch_create = true\n")
+        # Do not write local.toml: hardened non-local environments intentionally
+        # ignore it. These variables are scoped to this server subprocess.
+        server_env[
+            "LORE__SERVER__GRPC_PUBLIC_SERVICES__FORWARDED_REQUESTS__CLIENT__URL"
+        ] = f"http://{server_hostname}:{server_1_internal_port}"
+        server_env[
+            "LORE__SERVER__GRPC_PUBLIC_SERVICES__FORWARDED_REQUESTS__ENABLED_RPCS__REVISION_BRANCH_CREATE"
+        ] = "true"
 
         return server_root, server_env
 
