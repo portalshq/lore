@@ -180,9 +180,8 @@ panic = "abort"
 inherits = "release"
 incremental = false
 opt-level = 3
-debug = 2
 lto = "fat"
-codegen-units = 4
+codegen-units = 16
 debug-assertions = false
 
 # Package overrides. Use this if you want to generate debug info or de-optimise a specific package

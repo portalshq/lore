@@ -48,6 +48,8 @@ const GENERATED_FILE_HEADER: &str = r#"// ======================================
 "#;
 
 fn main() -> Result<(), Box<dyn Error>> {
+    println!("cargo:rerun-if-env-changed=LORE_BUILD_VERSION_NAME");
+
     // Generate mod.rs files for plugins and hooks
     generate_plugins_mod()?;
     generate_hooks_mod()?;

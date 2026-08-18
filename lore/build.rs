@@ -11,6 +11,8 @@ use regex::Regex;
 include!("../build-helper.rs");
 
 fn main() -> Result<(), Box<dyn Error>> {
+    println!("cargo:rerun-if-env-changed=LORE_BUILD_VERSION_NAME");
+
     // Populate environment with build details
     let version = LoreVergen::default();
     vergen::Emitter::default()
