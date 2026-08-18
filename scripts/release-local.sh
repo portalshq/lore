@@ -74,6 +74,15 @@ if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
     exit 1
 fi
 
+# Fail fast with an actionable message instead of a half-hour build ending in
+# cargo's generic "--locked was passed" error.
+if ! cargo metadata --locked --format-version 1 >/dev/null 2>&1; then
+    echo "Cargo.lock is out of sync with Cargo.toml." >&2
+    echo "Run: cargo update --workspace" >&2
+    echo "Commit the updated Cargo.lock, then re-run this script." >&2
+    exit 1
+fi
+
 echo "Building Lore client and server from $(git rev-parse HEAD)..."
 LORE_BUILD_VERSION_NAME="$TAG" CARGO_INCREMENTAL=0 cargo build --locked --release \
     -p lore-client --bin lore \
