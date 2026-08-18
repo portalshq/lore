@@ -75,12 +75,12 @@ if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
 fi
 
 echo "Building Lore client and server from $(git rev-parse HEAD)..."
-CARGO_INCREMENTAL=0 cargo build --locked --release \
+LORE_BUILD_VERSION_NAME="$TAG" CARGO_INCREMENTAL=0 cargo build --locked --release \
     -p lore-client --bin lore \
     -p lore-server --bin loreserver
 
 echo "Running security-sensitive Rust tests..."
-CARGO_INCREMENTAL=0 cargo test --locked --release \
+LORE_BUILD_VERSION_NAME="$TAG" CARGO_INCREMENTAL=0 cargo test --locked --release \
     -p lore-credential \
     -p lore-server
 
