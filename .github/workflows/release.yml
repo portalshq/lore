@@ -89,7 +89,7 @@ jobs:
           shared-key: build-${{ matrix.target }}
       - name: Build Lore binaries
         shell: bash
-        timeout-minutes: 120
+        timeout-minutes: 300
         env:
           LORE_BUILD_VERSION_NAME: ${{ github.ref_name }}
         run: >-

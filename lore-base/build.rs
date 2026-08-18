@@ -31,6 +31,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         cc_builder.flag("-mcpu=neoverse-512tvb");
     }
 
+    cc_builder.define("RPMALLOC_FIRST_CLASS_HEAPS", Some("1"));
+
     if cc_builder.get_compiler().is_like_msvc() {
         cc_builder.flag("/experimental:c11atomics");
         cc_builder.flag("/std:c11");
