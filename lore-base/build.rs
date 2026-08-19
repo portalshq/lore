@@ -32,6 +32,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     cc_builder.define("RPMALLOC_FIRST_CLASS_HEAPS", Some("1"));
+    cc_builder.define("ENABLE_OVERRIDE", Some("0"));
 
     if cc_builder.get_compiler().is_like_msvc() {
         cc_builder.flag("/experimental:c11atomics");
