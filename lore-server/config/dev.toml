@@ -3,7 +3,7 @@
 # only for explicitly isolated compatibility testing.
 
 [server.auth]
-jwt_audience = ["lore", "portals.sh"]
+jwt_audience = ["lore", "portals.works"]
 
 [server.quic]
 enabled = false

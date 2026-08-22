@@ -2,7 +2,7 @@
 # deployment because they are account-specific; missing values fail startup.
 
 [server.auth]
-jwt_audience = ["lore", "portals.sh"]
+jwt_audience = ["lore", "portals.works"]
 
 [server.quic]
 enabled = false

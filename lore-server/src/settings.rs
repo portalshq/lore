@@ -226,10 +226,10 @@ fn validate_security_config(
     }
     let audiences = auth.jwt_audience.as_deref().unwrap_or_default();
     if !audiences.iter().any(|audience| audience == "lore")
-        || !audiences.iter().any(|audience| audience == "portals.sh")
+        || !audiences.iter().any(|audience| audience == "portals.works")
     {
         return Err(config::ConfigError::Message(
-            "strict security mode requires JWT audiences 'lore' and 'portals.sh'".to_string(),
+            "strict security mode requires JWT audiences 'lore' and 'portals.works'".to_string(),
         ));
     }
     if settings

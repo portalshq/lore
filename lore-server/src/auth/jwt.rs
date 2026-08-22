@@ -190,7 +190,7 @@ impl JwtVerifier {
             return Err(JwtVerifierError::EnvironmentMismatch);
         }
         if let Some(required) = self.jwt_audience.as_ref() {
-            for mandatory in ["lore", "portals.sh"] {
+            for mandatory in ["lore", "portals.works"] {
                 if required.iter().any(|audience| audience == mandatory)
                     && !authorization
                         .audience
@@ -679,7 +679,7 @@ mod tests {
             let verifier = JwtVerifier {
                 jwk_service: Arc::new(service),
                 jwt_issuer: Some("the issuer".to_string()),
-                jwt_audience: Some(vec!["lore".to_string(), "portals.sh".to_string()]),
+                jwt_audience: Some(vec!["lore".to_string(), "portals.works".to_string()]),
                 algorithm: AGREED_UPON_ALGORITHM,
                 required_environment: Some("the env".to_string()),
             };

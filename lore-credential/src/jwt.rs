@@ -150,16 +150,19 @@ mod tests {
 
     #[test]
     fn recipient_domain_requires_a_label_boundary() {
-        let roots = vec!["portals.sh".to_string()];
-        assert!(domain_in_root_domains("portals.sh", &roots));
-        assert!(domain_in_root_domains("lore.portals.sh", &roots));
-        assert!(!domain_in_root_domains("evilportals.sh", &roots));
-        assert!(!domain_in_root_domains("portals.sh.evil.example", &roots));
+        let roots = vec!["portals.works".to_string()];
+        assert!(domain_in_root_domains("portals.works", &roots));
+        assert!(domain_in_root_domains("lore.portals.works", &roots));
+        assert!(!domain_in_root_domains("evilportals.works", &roots));
+        assert!(!domain_in_root_domains(
+            "portals.works.evil.example",
+            &roots
+        ));
     }
 
     #[test]
     fn recipient_domain_normalizes_urls_case_and_trailing_dot() {
-        let roots = vec!["https://PORTALS.sh/issuer".to_string()];
-        assert!(domain_in_root_domains("Lore.Portals.SH.", &roots));
+        let roots = vec!["https://PORTALS.WORKS/issuer".to_string()];
+        assert!(domain_in_root_domains("Lore.Portals.WORKS.", &roots));
     }
 }
