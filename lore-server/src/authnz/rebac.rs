@@ -53,7 +53,20 @@ impl RebacClientHelper {
         // Authentication exchange is public; relationship mutation is not.
         // Production supplies an ECS Service Connect URL. The fallback keeps
         // local development compatible with the combined test service.
-        let rebac_url = std::env::var("LORE_REBAC_URL").unwrap_or(auth_url);
+        let mut rebac_url = std::env::var("LORE_REBAC_URL").unwrap_or(auth_url);
+        // Service Connect ReBAC is canonically :8087. If the URL has no explicit port
+        // (e.g. fallback to ucs-auth:// without port, or http://host without :8087),
+        // append :8087 for http so the dial is VIP:8087, not VIP:80.
+        // Also correct an explicit :80 (observed live as 100.50.45.236:80) to :8087.
+        if rebac_url.starts_with("http://") {
+            if rebac_url.ends_with(":80") || rebac_url.ends_with(":80/") {
+                rebac_url = rebac_url.replace(":80", ":8087");
+            } else if !rebac_url.matches(':').count().ge(&2) {
+                // http://host without port → http://host:8087
+                rebac_url = format!("{}:8087", rebac_url.trim_end_matches('/'));
+            }
+        }
+        tracing::debug!(%rebac_url, "ReBAC endpoint");
         let mut endpoint = tonic::transport::Endpoint::from_shared(rebac_url.clone())
             .warn_map_err(|_| Status::internal("Failed to create rebac endpoint"))?;
         if rebac_url.starts_with("https://") {
