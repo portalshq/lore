@@ -29,9 +29,28 @@ pub struct LoreAuthClientHelper {
 
 impl LoreAuthClientHelper {
     async fn new(auth_url: String) -> Result<LoreAuthClientHelper, Status> {
-        let mut endpoint = tonic::transport::Endpoint::from_shared(auth_url.clone())
+        // Normalize the advertised auth URL for server-to-server dialing.
+        // `ucs-auth://host` is a client-side discovery scheme; tonic would dial
+        // it as plain HTTP on port 80. Prefer LORE_REBAC_URL when set (the
+        // Service Connect ReBAC endpoint, canonically :8087); otherwise map
+        // ucs-auth:// to https:// and default missing ports to :8087.
+        let mut dial_url = std::env::var("LORE_REBAC_URL").unwrap_or_else(|_| {
+            match auth_url.split_once("://") {
+                Some(("ucs-auth", rest)) => format!("https://{rest}"),
+                _ => auth_url.clone(),
+            }
+        });
+        if dial_url.starts_with("http://") {
+            if dial_url.ends_with(":80") || dial_url.ends_with(":80/") {
+                dial_url = dial_url.replace(":80", ":8087");
+            } else if dial_url.matches(':').count() < 2 {
+                dial_url = format!("{}:8087", dial_url.trim_end_matches('/'));
+            }
+        }
+        tracing::debug!(%dial_url, "Lore auth (ReBAC) endpoint");
+        let mut endpoint = tonic::transport::Endpoint::from_shared(dial_url.clone())
             .warn_map_err(|_| Status::internal("Failed to create lore auth endpoint"))?;
-        if auth_url.starts_with("https://") {
+        if dial_url.starts_with("https://") {
             endpoint = endpoint
                 .tls_config(
                     ClientTlsConfig::new()

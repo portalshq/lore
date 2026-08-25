@@ -22,7 +22,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.8.4-portals.6"
+version = "0.8.4-portals.7"
 
 [workspace.dependencies]
 lore = { path = "lore" }
