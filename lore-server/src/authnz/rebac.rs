@@ -15,6 +15,7 @@ use lore_telemetry::timer::TimedResult;
 use lore_transport::grpc::CorrelationInterceptor;
 use opentelemetry::KeyValue;
 use smallvec::SmallVec;
+use tokio::time::{Duration, sleep};
 use tonic::Request;
 use tonic::Response;
 use tonic::Status;
@@ -51,13 +52,12 @@ pub struct RebacClientHelper {
 impl RebacClientHelper {
     async fn new(auth_url: String) -> Result<RebacClientHelper, Status> {
         // Authentication exchange is public; relationship mutation is not.
-        // Production supplies an ECS Service Connect URL. The fallback keeps
-        // local development compatible with the combined test service.
+        // Production uses the colocated Auth Gateway through the host-only
+        // ReBAC port. The fallback keeps local development compatible with
+        // the combined test service.
         let mut rebac_url = std::env::var("LORE_REBAC_URL").unwrap_or(auth_url);
-        // Service Connect ReBAC is canonically :8087. If the URL has no explicit port
-        // (e.g. fallback to ucs-auth:// without port, or http://host without :8087),
-        // append :8087 for http so the dial is VIP:8087, not VIP:80.
-        // Also correct an explicit :80 (observed live as 100.50.45.236:80) to :8087.
+        // ReBAC is canonically :8087. If the URL has no explicit port
+        // (for example http://127.0.0.1), append :8087 rather than dialing :80.
         if rebac_url.starts_with("http://") {
             if rebac_url.ends_with(":80") || rebac_url.ends_with(":80/") {
                 rebac_url = rebac_url.replace(":80", ":8087");
@@ -78,12 +78,27 @@ impl RebacClientHelper {
                 )
                 .warn_map_err(|_| Status::internal("Failed to configure TLS for rebac"))?;
         }
-        let channel = endpoint
-            .connect()
-            .await
-            .warn_map_err(|_| Status::internal("Failed to connect to rebac service"))?;
-        let client = RebacApiGrpcClient::with_interceptor(channel, CorrelationInterceptor);
-        Ok(RebacClientHelper { client })
+        let max_attempts = std::env::var("LORE_REBAC_CONNECT_MAX_ATTEMPTS")
+            .ok()
+            .and_then(|value| value.parse::<u32>().ok())
+            .filter(|value| *value > 0)
+            .unwrap_or(8);
+        for attempt in 1..=max_attempts {
+            match endpoint.clone().connect().await {
+                Ok(channel) => {
+                    let client =
+                        RebacApiGrpcClient::with_interceptor(channel, CorrelationInterceptor);
+                    return Ok(RebacClientHelper { client });
+                }
+                Err(error) if attempt < max_attempts => {
+                    let backoff_ms = 250_u64.saturating_mul(1_u64 << (attempt - 1).min(4));
+                    tracing::warn!(%rebac_url, attempt, max_attempts, backoff_ms, %error, "ReBAC unavailable; retrying connection");
+                    sleep(Duration::from_millis(backoff_ms)).await;
+                }
+                Err(_) => return Err(Status::internal("Failed to connect to rebac service")),
+            }
+        }
+        unreachable!("ReBAC retry loop returns on success or its final failure")
     }
 }
 

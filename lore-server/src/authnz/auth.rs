@@ -32,8 +32,8 @@ impl LoreAuthClientHelper {
         // `ucs-auth://host` is a client-side discovery scheme; server-side
         // `check_user_permission` is UrcAuthApi on the public ALB's gRPC
         // endpoint (https://auth.portals.works → 8084), NOT the ReBAC
-        // Service Connect endpoint (http://auth-gateway-rebac:8087) which
-        // only serves RebacApi.create_resource. Map ucs-auth:// → https://
+        // host-only ReBAC endpoint (http://127.0.0.1:8087) which only serves
+        // RebacApi.create_resource. Map ucs-auth:// → https://
         // so tonic dials 443 via the ALB, not 80 or 8087.
         let dial_url = match auth_url.split_once("://") {
             Some(("ucs-auth", rest)) => format!("https://{rest}"),
