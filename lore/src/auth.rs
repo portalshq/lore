@@ -396,6 +396,9 @@ async fn list_local(
 pub struct LoreAuthLogoutArgs {
     /// Auth service URL; empty resolves from the repository
     pub auth_url: LoreString,
+    /// Remote Lore server URL; used to discover the auth service when
+    /// `auth_url` is empty. This lets a client log out outside a repository.
+    pub remote_url: LoreString,
     /// Resource ID (e.g. `urc-{id}`); empty removes all tokens for the auth URL
     pub resource: LoreString,
     /// User identity to remove; empty removes all identities
@@ -445,8 +448,54 @@ async fn logout_local(
     LORE_CONTEXT
         .scope(execution, async move {
             let result = async move {
-                let auth_url =
-                    resolve_auth_endpoint(args.auth_url.as_str(), &repository_path).await?;
+                let auth_url = resolve_auth_endpoint(
+                    args.auth_url.as_str(),
+                    args.remote_url.as_str(),
+                    &repository_path,
+                )
+                .await?;
+
+                // Best-effort server-side revocation of the rotating family
+                // before deleting the local credential. Failures are ignored
+                // so logout still clears the device even when offline.
+                if !args.user_id.is_empty() {
+                    if let Ok(refresh) = lore_credential::token_store::load_refresh_token(
+                        &auth_url,
+                        args.user_id.as_str(),
+                    )
+                    .await
+                    {
+                        if let Ok(auth_impl) =
+                            lore_transport::auth::authentication::find(&auth_url)
+                        {
+                            let _ = auth_impl
+                                .revoke_refresh(&auth_url, &refresh, "")
+                                .await;
+                        }
+                    }
+                } else {
+                    // No user_id: revoke all identities' families for this auth URL
+                    if let Ok(identities) =
+                        lore_credential::token_store::load_identities(&auth_url).await
+                    {
+                        for identity in identities {
+                            if let Ok(refresh) =
+                                lore_credential::token_store::load_refresh_token(
+                                    &auth_url, &identity,
+                                )
+                                .await
+                            {
+                                if let Ok(auth_impl) =
+                                    lore_transport::auth::authentication::find(&auth_url)
+                                {
+                                    let _ = auth_impl
+                                        .revoke_refresh(&auth_url, &refresh, "")
+                                        .await;
+                                }
+                            }
+                        }
+                    }
+                }
 
                 if args.user_id.is_empty() {
                     lore_credential::token_store::remove_all_tokens_for_auth_url(&auth_url)
@@ -586,14 +635,21 @@ pub async fn local_user_info(
 
 async fn resolve_auth_endpoint(
     auth_endpoint: &str,
+    remote_url: &str,
     repository_path: &str,
 ) -> Result<String, AuthStoreError> {
     if !auth_endpoint.is_empty() {
         return Ok(auth_endpoint.to_string());
     }
 
-    // Try to get the auth URL from the repository's remote environment
-    if let Some(remote_url) = read_repository_config(repository_path)
+    let remote_url = if remote_url.is_empty() {
+        read_repository_config(repository_path)
+    } else {
+        Some(remote_url.to_string())
+    };
+
+    // Try to get the auth URL from the explicit or repository remote environment.
+    if let Some(remote_url) = remote_url
         && let Ok(connection) = lore_revision::protocol::connect(
             &remote_url,
             "",
@@ -625,7 +681,8 @@ async fn local_user_info_impl(
         .scope(execution, async move {
             let result = async move {
                 let auth_endpoint =
-                    resolve_auth_endpoint(args.auth_endpoint.as_str(), &repository_path).await?;
+                    resolve_auth_endpoint(args.auth_endpoint.as_str(), "", &repository_path)
+                        .await?;
 
                 let mut user_ids: Vec<String> = args
                     .user_ids

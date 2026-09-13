@@ -127,9 +127,8 @@ impl Authentication for UcsAuthentication {
                 user_id: token.user_id,
                 user_name: token.user_name,
                 expires_ms: token.expires_at.max(0) as u64,
-                // Populated by orchestration layer via JWT decode, not the proto response
                 acceptable_root_domains: Vec::new(),
-                refresh_token: None,
+                refresh_token: token.refresh_token.filter(|t| !t.is_empty()),
             })),
             None => Ok(None),
         }
@@ -163,21 +162,35 @@ impl Authentication for UcsAuthentication {
             user_id: user_token.user_id,
             user_name: user_token.user_name,
             expires_ms: user_token.expires_at.max(0) as u64,
-            // Populated by orchestration layer via JWT decode, not the proto response
             acceptable_root_domains: Vec::new(),
-            refresh_token: None,
+            refresh_token: user_token.refresh_token.filter(|t| !t.is_empty()),
         })
     }
 
     async fn refresh_authentication(
         &self,
-        _auth_url: &str,
-        _refresh_token: &str,
+        auth_url: &str,
+        refresh_token: &str,
         _correlation_id: &str,
     ) -> Result<AuthenticationToken, ProtocolError> {
-        Err(ProtocolError::from(NotSupported {
-            operation: "refresh_authentication".to_string(),
-        }))
+        let mut client = connect_client(auth_url).await?;
+        let mut request = tonic::Request::new(lore_proto::auth::RefreshAuthSessionRequest {});
+        set_auth_header(&mut request, refresh_token)?;
+        let user_token = client
+            .refresh_auth_session(request)
+            .await
+            .map_err(ProtocolError::from)?
+            .into_inner()
+            .user_token
+            .ok_or_else(|| ProtocolError::internal("empty user token in refresh response"))?;
+        Ok(AuthenticationToken {
+            token: user_token.user_token,
+            user_id: user_token.user_id,
+            user_name: user_token.user_name,
+            expires_ms: user_token.expires_at.max(0) as u64,
+            acceptable_root_domains: Vec::new(),
+            refresh_token: user_token.refresh_token.filter(|t| !t.is_empty()),
+        })
     }
 
     async fn exchange_for_repository(
@@ -226,6 +239,22 @@ impl Authentication for UcsAuthentication {
             // Populated by orchestration layer via JWT decode, not the proto response
             acceptable_root_domains: Vec::new(),
         })
+    }
+
+    async fn revoke_refresh(
+        &self,
+        auth_url: &str,
+        refresh_token: &str,
+        _correlation_id: &str,
+    ) -> Result<(), ProtocolError> {
+        let mut client = connect_client(auth_url).await?;
+        let mut request = tonic::Request::new(lore_proto::auth::RevokeAuthSessionRequest {});
+        set_auth_header(&mut request, refresh_token)?;
+        client
+            .revoke_auth_session(request)
+            .await
+            .map_err(ProtocolError::from)?;
+        Ok(())
     }
 
     async fn get_user_info(
@@ -333,13 +362,23 @@ mod tests {
         assert_eq!(rid, "urc-00000000000000000000000000000000");
     }
 
-    #[tokio::test]
-    async fn refresh_returns_not_supported() {
-        let auth = UcsAuthentication;
-        let result = auth
-            .refresh_authentication("ucs-auth://auth.example.com", "refresh-tok", "corr-1")
-            .await;
-        assert!(result.is_err());
-        assert!(result.unwrap_err().is_not_supported());
+    #[test]
+    fn user_token_preserves_renewable_session() {
+        let token = lore_proto::auth::UserToken {
+            user_token: "auth-token".into(),
+            expires_at: 1,
+            user_id: "user-1".into(),
+            user_name: "User One".into(),
+            refresh_token: Some("refresh-token".into()),
+        };
+        let converted = AuthenticationToken {
+            token: token.user_token.clone(),
+            user_id: token.user_id.clone(),
+            user_name: token.user_name.clone(),
+            expires_ms: token.expires_at.max(0) as u64,
+            acceptable_root_domains: Vec::new(),
+            refresh_token: token.refresh_token.clone().filter(|t| !t.is_empty()),
+        };
+        assert_eq!(converted.refresh_token.as_deref(), Some("refresh-token"));
     }
 }

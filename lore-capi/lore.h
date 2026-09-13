@@ -3630,6 +3630,9 @@ typedef struct lore_auth_list_args_t {
 typedef struct lore_auth_logout_args_t {
   // Auth service URL; empty resolves from the repository
   struct lore_string_t auth_url;
+  // Remote Lore server URL; used to discover the auth service when
+  // `auth_url` is empty. This lets a client log out outside a repository.
+  struct lore_string_t remote_url;
   // Resource ID (e.g. `urc-{id}`); empty removes all tokens for the auth URL
   struct lore_string_t resource;
   // User identity to remove; empty removes all identities

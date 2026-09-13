@@ -50,6 +50,10 @@ pub struct RefreshAuthSessionResponse {
     #[prost(message, optional, tag = "1")]
     pub user_token: ::core::option::Option<UserToken>,
 }
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct RevokeAuthSessionRequest {}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct RevokeAuthSessionResponse {}
 /// Verify the target is compliant with the given Product Name as registered in `ucs-auth-api` config
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct VerifyCompliance {
@@ -116,6 +120,9 @@ pub struct UserToken {
     /// Display name
     #[prost(string, tag = "4")]
     pub user_name: ::prost::alloc::string::String,
+    /// Opaque rotating refresh credential; only present on auth-session creation/refresh
+    #[prost(string, optional, tag = "5")]
+    pub refresh_token: ::core::option::Option<::prost::alloc::string::String>,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ResourcePermission {
@@ -394,6 +401,30 @@ pub mod urc_auth_api_client {
             let mut req = request.into_request();
             req.extensions_mut()
                 .insert(GrpcMethod::new("epic_urc.UrcAuthApi", "RefreshAuthSession"));
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn revoke_auth_session(
+            &mut self,
+            request: impl tonic::IntoRequest<super::RevokeAuthSessionRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::RevokeAuthSessionResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/epic_urc.UrcAuthApi/RevokeAuthSession",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("epic_urc.UrcAuthApi", "RevokeAuthSession"));
             self.inner.unary(req, path, codec).await
         }
         pub async fn verify_user(

@@ -9,6 +9,8 @@ service UrcAuthApi {
   rpc GetAuthSession(GetAuthSessionRequest) returns (GetAuthSessionResponse) {};
   rpc RefreshAuthSession(RefreshAuthSessionRequest)
       returns (RefreshAuthSessionResponse) {};
+  rpc RevokeAuthSession(RevokeAuthSessionRequest)
+      returns (RevokeAuthSessionResponse) {};
   rpc VerifyUser(VerifyUserRequest)
       returns (VerifyUserResponse) {};
 
@@ -63,6 +65,10 @@ message RefreshAuthSessionRequest {}
 
 message RefreshAuthSessionResponse { optional UserToken user_token = 1; }
 
+message RevokeAuthSessionRequest {}
+
+message RevokeAuthSessionResponse {}
+
 // Verify the target is compliant with the given Product Name as registered in `ucs-auth-api` config
 message VerifyCompliance {
   string product_name = 1;
@@ -95,6 +101,7 @@ message UserToken {
   int64 expires_at = 2; // Epoch
   string user_id = 3;   // URC user ID
   string user_name = 4; // Display name
+  optional string refresh_token = 5; // Opaque rotating refresh credential; only present on auth-session creation/refresh
 }
 
 message ResourcePermission {

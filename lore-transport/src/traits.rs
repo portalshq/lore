@@ -414,4 +414,12 @@ pub trait Authentication: Send + Sync {
         display_name: &str,
         correlation_id: &str,
     ) -> Result<Option<ResolvedUser>, ProtocolError>;
+
+    /// Revokes the refresh family associated with the presented refresh token.
+    async fn revoke_refresh(
+        &self,
+        auth_url: &str,
+        refresh_token: &str,
+        correlation_id: &str,
+    ) -> Result<(), ProtocolError>;
 }
