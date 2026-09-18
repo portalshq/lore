@@ -71,7 +71,11 @@ $HttpPort = 41339
 if (-not $Token) {
     $ghCmd = Get-Command gh -ErrorAction SilentlyContinue
     if ($ghCmd) {
-        $t = (gh auth token --hostname github.com 2>$null)
+        # Best effort only: an unauthenticated gh writes to stderr, which is
+        # terminating under $ErrorActionPreference Stop and would kill the
+        # whole install. Contain it so the install falls back to anonymous
+        # download, mirroring install.sh's `|| true`.
+        $t = try { (gh auth token --hostname github.com 2>$null) } catch { $null }
         if ($LASTEXITCODE -eq 0 -and $t) { $Token = $t.Trim(); Say "using GitHub token from gh CLI" }
     }
 }
@@ -166,7 +170,9 @@ function Install-Binary {
     if (-not $asset) { Die "no $Bin release found for $Triple (repo=$Repo version=$Version)" }
 
     if (Get-Command $Bin -ErrorAction SilentlyContinue) {
-        $cur = (& $Bin --version 2>$null); if (-not $cur) { $cur = $Bin }
+        # Best effort: a broken same-named binary must not kill the (re)install.
+        $cur = try { (& $Bin --version 2>$null) } catch { $null }
+        if (-not $cur) { $cur = $Bin }
         Say "$cur found - updating"
     } else { Say "installing $Bin" }
 
@@ -182,7 +188,8 @@ function Install-Binary {
     New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
     Copy-Item -Path $src.FullName -Destination $binPath -Force
 
-    $ver = (& $binPath --version 2>$null); if (-not $ver) { $ver = $Bin }
+    $ver = try { (& $binPath --version 2>$null) } catch { $null }
+    if (-not $ver) { $ver = $Bin }
     Say "installed $ver -> $binPath"
 }
 
@@ -313,3 +320,11 @@ try {
     }
 }
 catch { Die $_.Exception.Message }
+finally {
+    # Early Die (bad checksum, missing asset, fetch failure) must not leave
+    # downloaded archives in TEMP. Success paths already removed $Work; the
+    # Test-Path guard makes the second removal a no-op.
+    if ($Work -and (Test-Path $Work)) {
+        Remove-Item -Recurse -Force $Work -ErrorAction SilentlyContinue
+    }
+}
