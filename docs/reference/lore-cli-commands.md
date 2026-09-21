@@ -1997,7 +1997,11 @@ List all stored authentication identities
 
 Remove stored authentication and authorization tokens
 
-**Usage:** `lore auth logout [OPTIONS]`
+**Usage:** `lore auth logout [OPTIONS] [remote-url]`
+
+###### **Arguments:**
+
+* `<remote-url>` — Server URL used to discover the auth service outside a repository
 
 ###### **Options:**
 

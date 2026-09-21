@@ -72,6 +72,9 @@ pub struct AuthLogoutCliArgs {
     /// Auth service URL (omit to use current repository's auth URL)
     #[clap(long = "auth-url", value_name = "auth-url")]
     auth_url: Option<String>,
+    /// Server URL used to discover the auth service outside a repository
+    #[clap(value_name = "remote-url")]
+    remote_url: Option<String>,
     /// Resource ID to remove a specific authorization (e.g. "urc-{id}")
     #[clap(long, value_name = "resource")]
     resource: Option<String>,
@@ -362,13 +365,18 @@ pub fn handle_logout_command(globals: LoreGlobalArgs, args: &AuthLogoutCliArgs) 
             .with_defaults(),
     ));
 
-    let api_args = LoreAuthLogoutArgs {
-        auth_url: LoreString::from(&args.auth_url),
-        resource: args.resource.clone().into(),
-        user_id: LoreString::from(&args.user_id),
-    };
+    let api_args = logout_api_args(args);
 
     runtime().block_on(auth::logout(globals, api_args, callback)) as u8
+}
+
+fn logout_api_args(args: &AuthLogoutCliArgs) -> LoreAuthLogoutArgs {
+    LoreAuthLogoutArgs {
+        auth_url: LoreString::from(&args.auth_url),
+        remote_url: LoreString::from(&args.remote_url),
+        resource: args.resource.clone().into(),
+        user_id: LoreString::from(&args.user_id),
+    }
 }
 
 pub fn handle_clear_command(globals: LoreGlobalArgs) -> u8 {
@@ -480,6 +488,35 @@ pub fn handle_auth_commands(cmd: &AuthCommands, globals: LoreGlobalArgs) -> u8 {
         AuthCommands::List(args) => handle_list_command(globals, args),
         AuthCommands::Logout(args) => handle_logout_command(globals, args),
         AuthCommands::Clear => handle_clear_command(globals),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::Parser;
+    use clap::Subcommand;
+
+    use super::{AuthLogoutCliArgs, logout_api_args};
+
+    #[derive(Parser)]
+    struct TestCli {
+        #[command(subcommand)]
+        command: TestCommand,
+    }
+
+    #[derive(Subcommand)]
+    enum TestCommand {
+        Logout(AuthLogoutCliArgs),
+    }
+
+    #[test]
+    fn logout_remote_url_is_parsed_and_passed_to_the_auth_api() {
+        let cli = TestCli::try_parse_from(["lore", "logout", "lore://example.test"])
+            .expect("logout remote URL should parse");
+        let TestCommand::Logout(args) = cli.command;
+
+        let api_args = logout_api_args(&args);
+        assert_eq!(api_args.remote_url.as_str(), "lore://example.test");
     }
 }
 
