@@ -219,8 +219,9 @@ This page is generated from `lore --markdown-help` (CLI `0.8.2-nightly+31`). Eve
 * `--compress-limit <count>` — Set maximum number of parallel compress operations
 * `--search-limit <SEARCH_LIMIT>` — Set maximum number of revisions to search when matching or finding revisions
 * `--search-nearest` — Set to search for nearest match when matching revisions
-* `--gc` — Set to run automatic garbage collection on local store in background
+* `--no-gc` — Prevent automatic incremental garbage collection for this command; it otherwise runs in the background on writes. `lore repository gc` always runs a full pass regardless
 * `--sync-data` — Force sync data to storage media during flush
+* `--cache` — Cache fragment payloads fetched from remote in the local store
 * `--non-interactive` — Disable interactive prompts (e.g., per-link commit messages)
 
 
@@ -938,7 +939,7 @@ Branch latest related commands
 
 ###### **Subcommands:**
 
-* `list` —
+* `list` — 
 
 
 
@@ -1960,6 +1961,7 @@ Authenticate the CLI
 
 * `--token-type <TOKEN_TYPE>` — Token type for non-interactive login (e.g. "api-key", "eg1", "lore")
 * `--token <TOKEN>` — Token value for non-interactive login (requires --token-type)
+* `--token-stdin` — Read the non-interactive token from stdin so it never appears in argv
 * `--auth-url <AUTH_URL>` — Auth service URL with scheme (e.g. `ucs-auth://auth.example.com`). Required when logging in with `--token` outside a repository without a remote-url
 * `--no-browser` — Avoid opening a browser to login
 
@@ -2110,6 +2112,7 @@ Authenticate the CLI
 
 * `--token-type <TOKEN_TYPE>` — Token type for non-interactive login (e.g. "api-key", "eg1", "lore")
 * `--token <TOKEN>` — Token value for non-interactive login (requires --token-type)
+* `--token-stdin` — Read the non-interactive token from stdin so it never appears in argv
 * `--auth-url <AUTH_URL>` — Auth service URL with scheme (e.g. `ucs-auth://auth.example.com`). Required when logging in with `--token` outside a repository without a remote-url
 * `--no-browser` — Avoid opening a browser to login
 
@@ -2686,9 +2689,9 @@ Manage the shared store
 
 ###### **Subcommands:**
 
-* `create` —
-* `info` —
-* `set-use-automatically` —
+* `create` — 
+* `info` — 
+* `set-use-automatically` — 
 
 
 
@@ -2735,3 +2738,4 @@ Manage the shared store
     This document was generated automatically by
     <a href="https://crates.io/crates/clap-markdown"><code>clap-markdown</code></a>.
 </i></small>
+
