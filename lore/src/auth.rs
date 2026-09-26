@@ -465,12 +465,9 @@ async fn logout_local(
                     )
                     .await
                     {
-                        if let Ok(auth_impl) =
-                            lore_transport::auth::authentication::find(&auth_url)
+                        if let Ok(auth_impl) = lore_transport::auth::authentication::find(&auth_url)
                         {
-                            let _ = auth_impl
-                                .revoke_refresh(&auth_url, &refresh, "")
-                                .await;
+                            let _ = auth_impl.revoke_refresh(&auth_url, &refresh, "").await;
                         }
                     }
                 } else {
@@ -479,18 +476,15 @@ async fn logout_local(
                         lore_credential::token_store::load_identities(&auth_url).await
                     {
                         for identity in identities {
-                            if let Ok(refresh) =
-                                lore_credential::token_store::load_refresh_token(
-                                    &auth_url, &identity,
-                                )
-                                .await
+                            if let Ok(refresh) = lore_credential::token_store::load_refresh_token(
+                                &auth_url, &identity,
+                            )
+                            .await
                             {
                                 if let Ok(auth_impl) =
                                     lore_transport::auth::authentication::find(&auth_url)
                                 {
-                                    let _ = auth_impl
-                                        .revoke_refresh(&auth_url, &refresh, "")
-                                        .await;
+                                    let _ = auth_impl.revoke_refresh(&auth_url, &refresh, "").await;
                                 }
                             }
                         }
