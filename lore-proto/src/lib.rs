@@ -2,8 +2,6 @@
 // SPDX-License-Identifier: MIT
 // The included files do not pass this lint
 #![allow(clippy::doc_markdown)]
-// async_trait-generated gRPC methods trigger this lint on recent Clippy versions.
-#![allow(clippy::double_must_use)]
 
 #[rustfmt::skip]
 #[path = "grpc/epic_urc.rs"]

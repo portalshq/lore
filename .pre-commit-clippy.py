@@ -11,7 +11,18 @@ if os.name == "nt":
     os.environ["PATH"] = os.pathsep.join(removed)
 
 result = subprocess.run(
-    ["cargo", "clippy", "--all-targets", "--", "-D", "warnings", "--no-deps"]
+    [
+        "cargo",
+        "clippy",
+        "--all-targets",
+        "--",
+        "-D",
+        "warnings",
+        # async_trait expands Future-returning methods with duplicate must_use.
+        "-A",
+        "clippy::double_must_use",
+        "--no-deps",
+    ]
 )
 
 exit(result.returncode)
