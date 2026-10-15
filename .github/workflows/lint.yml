@@ -17,6 +17,8 @@ jobs:
   pre-commit:
     name: pre-commit
     runs-on: ubuntu-latest
+    env:
+      RUSTUP_TOOLCHAIN: 1.97.0
     permissions:
       contents: read # Check out the PR head to lint it
     steps:
@@ -34,8 +36,8 @@ jobs:
       # Lore formats with nightly; clippy and cargo-deny run on stable.
       - name: Install Rust toolchains
         run: |
+          rustup toolchain install 1.97.0 --profile minimal -c clippy
           rustup toolchain install nightly --profile minimal -c rustfmt
-          rustup component add clippy rustfmt
 
       - name: Cache cargo registry and build artifacts
         uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
