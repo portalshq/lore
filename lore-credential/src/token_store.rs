@@ -423,10 +423,19 @@ fn reload_token_map(guard: &FSLock, store: &mut Option<TokenMap>) {
 /// cross-process store lock for the duration of the read.
 fn load_token_map(_guard: &FSLock) -> Result<TokenMap, TokenStoreError> {
     let path = token_map_path(false)?;
+    load_token_map_file(&path)
+}
+
+fn load_token_map_file(path: &Path) -> Result<TokenMap, TokenStoreError> {
     let mut options = store_open_options();
     options.read(true);
-    let mut config_file = match options.open(path.as_path()) {
+    let mut config_file = match options.open(path) {
         Ok(file) => file,
+        // A fresh identity has no credential file yet. Never hide other I/O
+        // failures or malformed credentials behind an anonymous session.
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(TokenMap::default());
+        }
         Err(err) => {
             lore_debug!("Failed to load token map file: {err}");
             return Err(TokenStoreError::internal_with_context(
@@ -435,7 +444,14 @@ fn load_token_map(_guard: &FSLock) -> Result<TokenMap, TokenStoreError> {
             ));
         }
     };
-    enforce_private_permissions(path.as_path()).map_err(|e| {
+    if !config_file
+        .metadata()
+        .map_err(|err| TokenStoreError::internal_with_context(err, "Inspecting token map"))?
+        .is_file()
+    {
+        return Err(TokenStoreError::internal("Token map is not a regular file"));
+    }
+    enforce_private_permissions(path).map_err(|e| {
         TokenStoreError::internal_with_context(e, "Failed to secure token map permissions")
     })?;
 
@@ -1321,6 +1337,26 @@ impl NonceSequence for CounterNonceSequence {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn missing_token_map_is_an_empty_identity_but_invalid_store_is_an_error() {
+        let directory = std::env::temp_dir().join(format!(
+            "portals-empty-identity-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&directory).unwrap();
+        let path = directory.join("tokens.toml");
+        assert!(load_token_map_file(&path).unwrap().remotes.is_empty());
+        std::fs::write(&path, "not valid [toml").unwrap();
+        assert!(load_token_map_file(&path).is_err());
+        assert!(load_token_map_file(&directory).is_err());
+        std::fs::remove_file(path).unwrap();
+        std::fs::remove_dir(directory).unwrap();
+    }
 
     #[test]
     fn renewal_journal_survives_reopen_and_blocks_replay() {

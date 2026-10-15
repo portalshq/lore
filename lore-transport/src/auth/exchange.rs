@@ -80,7 +80,13 @@ pub async fn authentication_token(
         tokens_only_for_recipient_domain(recipient.to_string()),
     )
     .await
-    .internal("Login required")?;
+    .map_err(|error| {
+        if error.is_token_not_found() {
+            ExchangeError::from(NotAuthenticated)
+        } else {
+            ExchangeError::internal_with_context(error, "Loading saved authentication")
+        }
+    })?;
     let info = lore_credential::user_info_from_token(token.clone())
         .ok_or_else(|| ExchangeError::internal("Invalid authentication; login required"))?;
     if !is_expired(info.expires.saturating_sub(60_000)) {
@@ -517,6 +523,10 @@ async fn auth_exchange_for_identity(
 ) -> (String, String, String) {
     let authentication_token = match authentication_token(auth_url, identity, remote_domain).await {
         Ok(token) => token,
+        Err(ExchangeError::NotAuthenticated(_)) => {
+            lore_debug!("No saved authentication for {identity}; skipping authorization");
+            return (String::new(), String::new(), String::new());
+        }
         Err(error) => {
             lore_warn!(
                 "Authentication unavailable: {error}. Retry network failures; otherwise run px auth login or lore auth login."
@@ -649,6 +659,10 @@ async fn auth_exchange_custom_resource_for_identity(
 ) -> (String, String, String) {
     let authentication_token = match authentication_token(auth_url, identity, remote_domain).await {
         Ok(token) => token,
+        Err(ExchangeError::NotAuthenticated(_)) => {
+            lore_debug!("No saved authentication for {identity}; skipping resource authorization");
+            return (String::new(), String::new(), String::new());
+        }
         Err(error) => {
             lore_warn!(
                 "Authentication unavailable: {error}. Retry network failures; otherwise run px auth login or lore auth login."
