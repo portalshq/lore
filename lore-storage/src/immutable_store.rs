@@ -1,5 +1,8 @@
 // SPDX-FileCopyrightText: 2026 Epic Games, Inc.
 // SPDX-License-Identifier: MIT
+// async_trait-generated methods trigger this lint on recent Clippy versions.
+#![allow(clippy::double_must_use)]
+
 use std::any::Any;
 use std::fmt::Debug;
 use std::sync::Arc;
