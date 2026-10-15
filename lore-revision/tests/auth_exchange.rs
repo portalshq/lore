@@ -29,6 +29,10 @@ mod tests {
     use lore_transport::auth::authentication;
 
     struct TestAuthentication {
+        refresh_not_sent: bool,
+        refresh_delay: Option<std::time::Duration>,
+        refresh_result:
+            Option<Box<dyn Fn() -> Result<AuthenticationToken, ProtocolError> + Send + Sync>>,
         exchange_result:
             Box<dyn Fn(RepositoryId) -> Result<AuthorizationToken, ProtocolError> + Send + Sync>,
     }
@@ -36,6 +40,9 @@ mod tests {
     impl TestAuthentication {
         fn always_succeed() -> Self {
             Self {
+                refresh_not_sent: false,
+                refresh_delay: None,
+                refresh_result: None,
                 exchange_result: Box::new(|_| {
                     Ok(AuthorizationToken {
                         token: "authz-token".into(),
@@ -48,12 +55,18 @@ mod tests {
 
         fn always_not_authorized() -> Self {
             Self {
+                refresh_not_sent: false,
+                refresh_delay: None,
+                refresh_result: None,
                 exchange_result: Box::new(|_| Err(ProtocolError::from(NotAuthorized))),
             }
         }
 
         fn always_not_authenticated() -> Self {
             Self {
+                refresh_not_sent: false,
+                refresh_delay: None,
+                refresh_result: None,
                 exchange_result: Box::new(|_| Err(ProtocolError::from(NotAuthenticated))),
             }
         }
@@ -61,6 +74,29 @@ mod tests {
 
     #[async_trait]
     impl Authentication for TestAuthentication {
+        async fn refresh_authentication_with_outcome(
+            &self,
+            auth_url: &str,
+            refresh: &str,
+            correlation: &str,
+        ) -> Result<AuthenticationToken, lore_transport::RefreshFailure> {
+            if self.refresh_not_sent {
+                return Err(lore_transport::RefreshFailure::NotSent(
+                    ProtocolError::from(lore_base::error::Disconnected),
+                ));
+            }
+            self.refresh_authentication(auth_url, refresh, correlation)
+                .await
+                .map_err(lore_transport::RefreshFailure::Uncertain)
+        }
+        async fn revoke_refresh(
+            &self,
+            _auth_url: &str,
+            _refresh_token: &str,
+            _correlation_id: &str,
+        ) -> Result<(), ProtocolError> {
+            Ok(())
+        }
         async fn start_auth_session(
             &self,
             _auth_url: &str,
@@ -100,6 +136,12 @@ mod tests {
             _refresh_token: &str,
             _correlation_id: &str,
         ) -> Result<AuthenticationToken, ProtocolError> {
+            if let Some(delay) = self.refresh_delay {
+                tokio::time::sleep(delay).await;
+            }
+            if let Some(refresh) = &self.refresh_result {
+                return refresh();
+            }
             Err(ProtocolError::from(NotSupported {
                 operation: "refresh_authentication".into(),
             }))
@@ -165,6 +207,236 @@ mod tests {
 
         let found = authentication::find(&format!("{scheme}://auth.test.com"));
         assert!(found.is_ok());
+    }
+
+    /// Run only with an isolated, disposable nonproduction credential store.
+    #[tokio::test]
+    #[ignore = "requires isolated LORE_AUTH_PATH and explicit nonproduction fallback store"]
+    async fn renewal_serializes_and_preserves_identity() {
+        use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+        use lore_credential::token_store;
+        use lore_transport::auth::exchange::authentication_token;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        assert_eq!(std::env::var("LORE_AUTH_STORE").unwrap(), "fallback");
+        assert_ne!(std::env::var("LORE_SECURITY_MODE").unwrap(), "strict");
+        assert!(
+            std::env::var("LORE_AUTH_PATH")
+                .unwrap()
+                .contains("portals-renewal-test")
+        );
+        let jwt = |expiry: u64| {
+            let header = URL_SAFE_NO_PAD.encode(r#"{"alg":"HS256","typ":"JWT"}"#);
+            let body = URL_SAFE_NO_PAD.encode(serde_json::json!({"iss":"https://auth.test.com","sub":"renewal-user","name":"Test","aud":["test.com"],"exp":expiry}).to_string());
+            format!("{header}.{body}.{}", URL_SAFE_NO_PAD.encode([0_u8; 32]))
+        };
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let old = jwt(now - 1);
+        let fresh = jwt(now + 900);
+        let count = Arc::new(AtomicUsize::new(0));
+        let mut provider = TestAuthentication::always_succeed();
+        let calls = count.clone();
+        let returned = fresh.clone();
+        provider.refresh_result = Some(Box::new(move || {
+            calls.fetch_add(1, Ordering::SeqCst);
+            Ok(AuthenticationToken {
+                token: returned.clone(),
+                user_id: "renewal-user".into(),
+                user_name: "Test".into(),
+                expires_ms: (now + 900) * 1000,
+                acceptable_root_domains: vec!["test.com".into()],
+                refresh_token: Some("next-test-refresh".into()),
+            })
+        }));
+        authentication::add("renewal-test", Arc::new(provider)).unwrap();
+        let url = "renewal-test://auth.test.com";
+        token_store::store_user_session(
+            url,
+            "renewal-user",
+            &old,
+            vec!["test.com".into()],
+            Some("initial-test-refresh"),
+        )
+        .await
+        .unwrap();
+        let (a, b) = tokio::join!(
+            authentication_token(url, "renewal-user", "test.com"),
+            authentication_token(url, "renewal-user", "test.com")
+        );
+        assert_eq!(a.unwrap(), fresh);
+        assert_eq!(b.unwrap(), fresh);
+        assert_eq!(count.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            token_store::load_refresh_token(url, "renewal-user")
+                .await
+                .unwrap(),
+            "next-test-refresh"
+        );
+        assert!(
+            authentication_token(url, "renewal-user", "evil.example")
+                .await
+                .is_err()
+        );
+
+        let mut unavailable = TestAuthentication::always_succeed();
+        let uncertain_calls = Arc::new(AtomicUsize::new(0));
+        let observed_calls = uncertain_calls.clone();
+        unavailable.refresh_result = Some(Box::new(move || {
+            observed_calls.fetch_add(1, Ordering::SeqCst);
+            Err(ProtocolError::from(lore_base::error::Disconnected))
+        }));
+        authentication::add("renewal-offline", Arc::new(unavailable)).unwrap();
+        let url = "renewal-offline://auth.test.com";
+        token_store::store_user_session(
+            url,
+            "renewal-user",
+            &old,
+            vec!["test.com".into()],
+            Some("retain-test-refresh"),
+        )
+        .await
+        .unwrap();
+        assert!(
+            authentication_token(url, "renewal-user", "test.com")
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            token_store::load_refresh_token(url, "renewal-user")
+                .await
+                .unwrap(),
+            "retain-test-refresh"
+        );
+        assert!(
+            authentication_token(url, "renewal-user", "test.com")
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            uncertain_calls.load(Ordering::SeqCst),
+            1,
+            "An uncertain refresh must not be replayed"
+        );
+        let mut unsent = TestAuthentication::always_succeed();
+        unsent.refresh_not_sent = true;
+        authentication::add("renewal-unsent", Arc::new(unsent)).unwrap();
+        let unsent_url = "renewal-unsent://auth.test.com";
+        token_store::store_user_session(
+            unsent_url,
+            "renewal-user",
+            &old,
+            vec!["test.com".into()],
+            Some("unsent-test-refresh"),
+        )
+        .await
+        .unwrap();
+        for _ in 0..2 {
+            assert!(
+                authentication_token(unsent_url, "renewal-user", "test.com")
+                    .await
+                    .is_err()
+            );
+        }
+        let mut guard = token_store::lock_refresh(unsent_url, "renewal-user")
+            .await
+            .unwrap();
+        token_store::begin_refresh_attempt(&mut guard, "unsent-test-refresh")
+            .expect("Unsent attempts must remain retryable");
+        token_store::clear_refresh_attempt(&mut guard).unwrap();
+        drop(guard);
+
+        let mut rejected = TestAuthentication::always_succeed();
+        rejected.refresh_result = Some(Box::new(|| Err(ProtocolError::from(NotAuthenticated))));
+        authentication::add("renewal-rejected", Arc::new(rejected)).unwrap();
+        let url = "renewal-rejected://auth.test.com";
+        token_store::store_user_session(
+            url,
+            "renewal-user",
+            &old,
+            vec!["test.com".into()],
+            Some("rejected-test-refresh"),
+        )
+        .await
+        .unwrap();
+        assert!(
+            authentication_token(url, "renewal-user", "test.com")
+                .await
+                .is_err()
+        );
+        assert!(
+            token_store::load_refresh_token(url, "renewal-user")
+                .await
+                .is_err()
+        );
+        for (scheme, malformed) in [
+            ("renewal-malformed", true),
+            ("renewal-missing-refresh", false),
+        ] {
+            let mut provider = TestAuthentication::always_succeed();
+            let returned = fresh.clone();
+            provider.refresh_result = Some(Box::new(move || {
+                Ok(AuthenticationToken {
+                    token: if malformed {
+                        "not-a-jwt".into()
+                    } else {
+                        returned.clone()
+                    },
+                    user_id: "renewal-user".into(),
+                    user_name: "Test".into(),
+                    expires_ms: (now + 900) * 1000,
+                    acceptable_root_domains: vec!["test.com".into()],
+                    refresh_token: None,
+                })
+            }));
+            authentication::add(scheme, Arc::new(provider)).unwrap();
+            let endpoint = format!("{scheme}://auth.test.com");
+            token_store::store_user_session(
+                &endpoint,
+                "renewal-user",
+                &old,
+                vec!["test.com".into()],
+                Some("original-test-refresh"),
+            )
+            .await
+            .unwrap();
+            assert!(
+                authentication_token(&endpoint, "renewal-user", "test.com")
+                    .await
+                    .is_err()
+            );
+            assert_eq!(
+                token_store::load_refresh_token(&endpoint, "renewal-user")
+                    .await
+                    .unwrap(),
+                "original-test-refresh"
+            );
+        }
+        let mut delayed = TestAuthentication::always_succeed();
+        delayed.refresh_delay = Some(std::time::Duration::from_secs(30));
+        authentication::add("renewal-timeout", Arc::new(delayed)).unwrap();
+        let endpoint = "renewal-timeout://auth.test.com";
+        token_store::store_user_session(
+            endpoint,
+            "renewal-user",
+            &old,
+            vec!["test.com".into()],
+            Some("timeout-test-refresh"),
+        )
+        .await
+        .unwrap();
+        assert!(
+            authentication_token(endpoint, "renewal-user", "test.com")
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            token_store::load_refresh_token(endpoint, "renewal-user")
+                .await
+                .unwrap(),
+            "timeout-test-refresh"
+        );
     }
 
     #[tokio::test]

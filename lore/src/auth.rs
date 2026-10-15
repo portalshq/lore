@@ -455,9 +455,27 @@ async fn logout_local(
                 )
                 .await?;
 
+                // Prevent a concurrent renewer from republishing credentials
+                // after logout removes them. Deterministic order avoids cycles
+                // when two processes log out of the same set of identities.
+                let mut logout_identities = if args.user_id.is_empty() {
+                    lore_credential::token_store::load_identities(&auth_url).await
+                        .forward::<AuthStoreError>("loading logout identities")?
+                } else { vec![args.user_id.as_str().to_string()] };
+                logout_identities.sort();
+                let mut renewal_guards = Vec::new();
+                for identity in &logout_identities {
+                    renewal_guards.push(lore_credential::token_store::lock_refresh(&auth_url, identity).await
+                        .forward::<AuthStoreError>("waiting for in-flight renewal before logout")?);
+                }
+                if !logout_identities.is_empty() {
+                    lore_credential::token_store::reload_credentials().await
+                        .forward::<AuthStoreError>("reloading credentials before revocation")?;
+                }
+
                 // Best-effort server-side revocation of the rotating family
-                // before deleting the local credential. Failures are ignored
-                // so logout still clears the device even when offline.
+                // before deleting local credentials. Report remote failures
+                // separately; an offline logout must still clear the device.
                 if !args.user_id.is_empty() {
                     if let Ok(refresh) = lore_credential::token_store::load_refresh_token(
                         &auth_url,
@@ -467,7 +485,9 @@ async fn logout_local(
                     {
                         if let Ok(auth_impl) = lore_transport::auth::authentication::find(&auth_url)
                         {
-                            let _ = auth_impl.revoke_refresh(&auth_url, &refresh, "").await;
+                            if !matches!(tokio::time::timeout(std::time::Duration::from_secs(10), auth_impl.revoke_refresh(&auth_url, &refresh, "")).await, Ok(Ok(_))) {
+                                eprintln!("Local logout will continue; remote session revocation could not be confirmed.");
+                            }
                         }
                     }
                 } else {
@@ -484,7 +504,9 @@ async fn logout_local(
                                 if let Ok(auth_impl) =
                                     lore_transport::auth::authentication::find(&auth_url)
                                 {
-                                    let _ = auth_impl.revoke_refresh(&auth_url, &refresh, "").await;
+                                    if !matches!(tokio::time::timeout(std::time::Duration::from_secs(10), auth_impl.revoke_refresh(&auth_url, &refresh, "")).await, Ok(Ok(_))) {
+                                        eprintln!("Local logout will continue; remote session revocation could not be confirmed.");
+                                    }
                                 }
                             }
                         }

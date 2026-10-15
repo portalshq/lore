@@ -4,6 +4,20 @@ use bytes::Bytes;
 use lore_base::types::*;
 use serde::Deserialize;
 
+/// Refresh retry safety; an uncertain request must never be replayed.
+pub enum RefreshFailure {
+    NotSent(crate::error::ProtocolError),
+    Uncertain(crate::error::ProtocolError),
+}
+
+impl RefreshFailure {
+    pub fn into_error(self) -> crate::error::ProtocolError {
+        match self {
+            Self::NotSent(error) | Self::Uncertain(error) => error,
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Environment types
 // ---------------------------------------------------------------------------

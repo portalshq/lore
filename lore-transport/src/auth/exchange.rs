@@ -62,6 +62,102 @@ pub fn is_expired(expires: u64) -> bool {
     current_time >= expires
 }
 
+/// Renew before dispatch; do not replay a possibly consumed refresh request.
+pub async fn authentication_token(
+    auth_url: &str,
+    identity: &str,
+    recipient: &str,
+) -> Result<String, ExchangeError> {
+    let mut refresh_lock = token_store::lock_refresh(auth_url, identity)
+        .await
+        .internal("Authentication renewal lock unavailable; retry")?;
+    token_store::reload_credentials()
+        .await
+        .internal("Reloading authentication")?;
+    let token = token_store::load_user_token(
+        auth_url,
+        identity,
+        tokens_only_for_recipient_domain(recipient.to_string()),
+    )
+    .await
+    .internal("Login required")?;
+    let info = lore_credential::user_info_from_token(token.clone())
+        .ok_or_else(|| ExchangeError::internal("Invalid authentication; login required"))?;
+    if !is_expired(info.expires.saturating_sub(60_000)) {
+        return Ok(token);
+    }
+    let refresh = token_store::load_refresh_token(auth_url, identity)
+        .await
+        .internal("Session cannot renew; run px auth login or lore auth login")?;
+    let provider = authentication::find(auth_url)
+        .forward::<ExchangeError>("Finding authentication provider")?;
+    token_store::begin_refresh_attempt(&mut refresh_lock, &refresh)
+        .internal("Preparing one-time renewal")?;
+    let renewed = match tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        provider.refresh_authentication_with_outcome(auth_url, &refresh, ""),
+    )
+    .await
+    {
+        Ok(Ok(value)) => value,
+        Ok(Err(crate::types::RefreshFailure::NotSent(error))) => {
+            token_store::clear_refresh_attempt(&mut refresh_lock)
+                .internal("Clearing unsent renewal")?;
+            return Err(error).forward::<ExchangeError>(
+                "Auth connection failed before dispatch; credentials retained, retry safely",
+            );
+        }
+        Ok(Err(crate::types::RefreshFailure::Uncertain(error))) => {
+            if matches!(
+                error,
+                crate::error::ProtocolError::NotAuthenticated(_)
+                    | crate::error::ProtocolError::NotAuthorized(_)
+            ) {
+                token_store::remove_user_tokens_for_auth_url(auth_url, identity)
+                    .await
+                    .internal("Removing rejected session")?;
+                token_store::clear_refresh_attempt(&mut refresh_lock)
+                    .internal("Clearing rejected renewal")?;
+            }
+            return Err(error).forward::<ExchangeError>(
+                "Renewal failed; outcome may be unknown, log in again if needed; credential was not replayed",
+            );
+        }
+        Err(_) => {
+            return Err(ExchangeError::internal(
+                "Renewal timed out; outcome unknown, login may be required; request was not replayed",
+            ));
+        }
+    };
+    let decoded = insecure_decode_token(&renewed.token).internal("Malformed renewed token")?;
+    let roots = decoded.claims.acceptable_root_domains();
+    if renewed.user_id != identity
+        || decoded.claims.user_id != identity
+        || decoded.claims.is_service_account.unwrap_or(false) != info.is_service_account
+        || is_expired(decoded.claims.expires.saturating_mul(1000))
+    {
+        return Err(ExchangeError::internal(
+            "Renewed identity or expiration mismatch; login required",
+        ));
+    }
+    verify_jwt_usage_for_remote(&decoded.claims, recipient)
+        .forward::<ExchangeError>("Renewed token recipient mismatch")?;
+    let next_refresh = renewed.refresh_token.as_deref().ok_or_else(|| {
+        ExchangeError::internal("Missing replacement refresh token; login required")
+    })?;
+    token_store::store_user_session(
+        auth_url,
+        identity,
+        &renewed.token,
+        roots,
+        Some(next_refresh),
+    )
+    .await
+    .internal("Persisting renewed session; login may be required")?;
+    token_store::clear_refresh_attempt(&mut refresh_lock).internal("Clearing completed renewal")?;
+    Ok(renewed.token)
+}
+
 /// Exchanges an authentication token for a repository-scoped authorization
 /// token via the registered `Authentication` implementation.
 ///
@@ -143,16 +239,8 @@ pub async fn exchange(
 
     // Load authn token for the auth service domain
     lore_trace!("Authorizing using authn identity: {identity}");
-    let Some(auth_service_only_token) = lore_credential::user_info(
-        auth_url.as_str(),
-        identity,
-        tokens_only_for_recipient_domain(auth_domain),
-    )
-    .await
-    else {
-        lore_debug!("Not authenticated, unable to perform authz exchange");
-        return Err(NotAuthenticated.into());
-    };
+    let auth_service_only_token =
+        authentication_token(auth_url.as_str(), identity, &auth_domain).await?;
     lore_trace!("Authorizing using endpoint: {auth_url}");
 
     let time_start = Instant::now();
@@ -168,7 +256,7 @@ pub async fn exchange(
     let authz = auth_impl
         .exchange_for_repository(
             &auth_url,
-            &auth_service_only_token.token,
+            &auth_service_only_token,
             repository,
             &correlation_id,
         )
@@ -301,16 +389,8 @@ pub async fn exchange_custom_resource(
     }
 
     lore_trace!("Authorizing using authn identity: {identity}");
-    let Some(auth_service_only_token) = lore_credential::user_info(
-        auth_url.as_str(),
-        identity,
-        tokens_only_for_recipient_domain(auth_domain),
-    )
-    .await
-    else {
-        lore_debug!("Not authenticated, unable to perform authz exchange");
-        return Err(NotAuthenticated.into());
-    };
+    let auth_service_only_token =
+        authentication_token(auth_url.as_str(), identity, &auth_domain).await?;
     lore_trace!("Authorizing using endpoint: {auth_url}");
 
     let time_start = Instant::now();
@@ -325,7 +405,7 @@ pub async fn exchange_custom_resource(
     let authz = auth_impl
         .exchange_for_custom_resource(
             &auth_url,
-            &auth_service_only_token.token,
+            &auth_service_only_token,
             resource_id,
             &correlation_id,
         )
@@ -398,6 +478,12 @@ pub async fn auth_exchange(
         lore_debug!("No identities found for {auth_url}");
         return (String::new(), String::new(), String::new());
     };
+    if identities.len() > 1 {
+        lore_warn!(
+            "Multiple authentication identities; select an explicit identity rather than switching accounts automatically"
+        );
+        return (String::new(), String::new(), String::new());
+    }
 
     if repository.is_zero() {
         // No resource, pick first identity with a valid authn token
@@ -429,15 +515,14 @@ async fn auth_exchange_for_identity(
     identity: &str,
     repository: RepositoryId,
 ) -> (String, String, String) {
-    let Ok(authentication_token) = token_store::load_user_token(
-        auth_url,
-        identity,
-        tokens_only_for_recipient_domain(remote_domain.to_string()),
-    )
-    .await
-    else {
-        lore_debug!("Auth exchange failed, no user authentication token found for {identity}");
-        return (String::new(), String::new(), String::new());
+    let authentication_token = match authentication_token(auth_url, identity, remote_domain).await {
+        Ok(token) => token,
+        Err(error) => {
+            lore_warn!(
+                "Authentication unavailable: {error}. Retry network failures; otherwise run px auth login or lore auth login."
+            );
+            return (String::new(), String::new(), String::new());
+        }
     };
 
     // Reject expired authn tokens
@@ -536,6 +621,12 @@ pub async fn auth_exchange_custom_resource(
         lore_debug!("No identities found for {auth_url}");
         return (String::new(), String::new(), String::new());
     };
+    if identities.len() > 1 {
+        lore_warn!(
+            "Multiple authentication identities; select an explicit identity rather than switching accounts automatically"
+        );
+        return (String::new(), String::new(), String::new());
+    }
 
     for entry in &identities {
         let result =
@@ -556,15 +647,14 @@ async fn auth_exchange_custom_resource_for_identity(
     identity: &str,
     resource_id: &str,
 ) -> (String, String, String) {
-    let Ok(authentication_token) = token_store::load_user_token(
-        auth_url,
-        identity,
-        tokens_only_for_recipient_domain(remote_domain.to_string()),
-    )
-    .await
-    else {
-        lore_debug!("Auth exchange failed, no user authentication token found for {identity}");
-        return (String::new(), String::new(), String::new());
+    let authentication_token = match authentication_token(auth_url, identity, remote_domain).await {
+        Ok(token) => token,
+        Err(error) => {
+            lore_warn!(
+                "Authentication unavailable: {error}. Retry network failures; otherwise run px auth login or lore auth login."
+            );
+            return (String::new(), String::new(), String::new());
+        }
     };
 
     if let Some(info) = lore_credential::user_info_from_token(authentication_token.clone())

@@ -47,6 +47,8 @@ async fn connect_client(
     let endpoint = grpc_endpoint(auth_url);
     let channel = tonic::transport::Endpoint::new(endpoint)
         .map_err(|e| ProtocolError::internal(format!("invalid auth endpoint: {e}")))?
+        .connect_timeout(std::time::Duration::from_secs(3))
+        .timeout(std::time::Duration::from_secs(5))
         .connect()
         .await
         .map_err(|e| ProtocolError::internal(format!("failed to connect to auth endpoint: {e}")))?;
@@ -171,18 +173,35 @@ impl Authentication for UcsAuthentication {
         &self,
         auth_url: &str,
         refresh_token: &str,
-        _correlation_id: &str,
+        correlation_id: &str,
     ) -> Result<AuthenticationToken, ProtocolError> {
-        let mut client = connect_client(auth_url).await?;
+        self.refresh_authentication_with_outcome(auth_url, refresh_token, correlation_id)
+            .await
+            .map_err(RefreshFailure::into_error)
+    }
+
+    async fn refresh_authentication_with_outcome(
+        &self,
+        auth_url: &str,
+        refresh_token: &str,
+        _correlation_id: &str,
+    ) -> Result<AuthenticationToken, RefreshFailure> {
+        let mut client = connect_client(auth_url)
+            .await
+            .map_err(RefreshFailure::NotSent)?;
         let mut request = tonic::Request::new(lore_proto::auth::RefreshAuthSessionRequest {});
-        set_auth_header(&mut request, refresh_token)?;
+        set_auth_header(&mut request, refresh_token).map_err(RefreshFailure::NotSent)?;
         let user_token = client
             .refresh_auth_session(request)
             .await
-            .map_err(ProtocolError::from)?
+            .map_err(|error| RefreshFailure::Uncertain(ProtocolError::from(error)))?
             .into_inner()
             .user_token
-            .ok_or_else(|| ProtocolError::internal("empty user token in refresh response"))?;
+            .ok_or_else(|| {
+                RefreshFailure::Uncertain(ProtocolError::internal(
+                    "empty user token in refresh response",
+                ))
+            })?;
         Ok(AuthenticationToken {
             token: user_token.user_token,
             user_id: user_token.user_id,

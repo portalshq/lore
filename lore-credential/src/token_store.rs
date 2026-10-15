@@ -3,6 +3,7 @@
 use std::fs;
 use std::io::Read;
 use std::io::Write;
+use std::io::{Seek, SeekFrom};
 use std::path::Path;
 use std::path::PathBuf;
 use std::str;
@@ -147,6 +148,93 @@ fn base_path(create_dir: bool) -> Result<PathBuf, TokenStoreError> {
 fn token_map_path(create_dir: bool) -> Result<PathBuf, TokenStoreError> {
     let path = base_path(create_dir)?;
     Ok(path.join("tokens.toml"))
+}
+
+/// Per-identity lock, separate from the store lock: no blocking executor wait.
+pub async fn lock_refresh(
+    auth_endpoint: &str,
+    identity: &str,
+) -> Result<fs::File, TokenStoreError> {
+    let digest = ring::digest::digest(
+        &ring::digest::SHA256,
+        format!("{}\0{}", auth_endpoint.trim_end_matches('/'), identity).as_bytes(),
+    );
+    let name = digest
+        .as_ref()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<String>();
+    let path = base_path(true)?.join(format!("refresh-{name}.lock"));
+    let file = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(&path)
+        .map_err(|_| TokenStoreError::internal("Unable to open refresh lock"))?;
+    enforce_private_permissions(&path)
+        .map_err(|_| TokenStoreError::internal("Unable to secure refresh lock"))?;
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(15);
+    loop {
+        match file.try_lock() {
+            Ok(()) => return Ok(file),
+            Err(std::fs::TryLockError::WouldBlock) if tokio::time::Instant::now() < deadline => {
+                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            }
+            _ => {
+                return Err(TokenStoreError::internal(
+                    "Refresh lock unavailable or timed out; retry",
+                ));
+            }
+        }
+    }
+}
+
+pub async fn reload_credentials() -> Result<(), TokenStoreError> {
+    let mut map = token_map().lock().await;
+    let guard = lock_token_map().await?;
+    *map = Some(load_token_map(&guard)?);
+    Ok(())
+}
+
+/// Write-ahead marker contains only a SHA-256 fingerprint, never a credential.
+/// Caller holds the per-identity OS lock across dispatch and pair persistence.
+pub fn begin_refresh_attempt(lock: &mut fs::File, refresh: &str) -> Result<(), TokenStoreError> {
+    let fingerprint = BASE64_STANDARD
+        .encode(ring::digest::digest(&ring::digest::SHA256, refresh.as_bytes()).as_ref());
+    lock.seek(SeekFrom::Start(0))
+        .map_err(|_| TokenStoreError::internal("Unable to read renewal journal"))?;
+    let mut previous = String::new();
+    (&mut *lock)
+        .take(128)
+        .read_to_string(&mut previous)
+        .map_err(|_| TokenStoreError::internal("Unable to read renewal journal"))?;
+    if !previous.is_empty() {
+        if BASE64_STANDARD
+            .decode(&previous)
+            .map_or(true, |bytes| bytes.len() != 32)
+        {
+            return Err(TokenStoreError::internal(
+                "Incomplete renewal journal; login required",
+            ));
+        }
+        if previous == fingerprint {
+            return Err(TokenStoreError::internal(
+                "Previous renewal outcome unknown; log in again instead of replaying the refresh credential",
+            ));
+        }
+    }
+    lock.seek(SeekFrom::Start(0))
+        .and_then(|_| lock.set_len(0))
+        .and_then(|_| lock.write_all(fingerprint.as_bytes()))
+        .and_then(|_| lock.sync_all())
+        .map_err(|_| TokenStoreError::internal("Unable to persist renewal journal"))
+}
+
+pub fn clear_refresh_attempt(lock: &mut fs::File) -> Result<(), TokenStoreError> {
+    lock.set_len(0)
+        .and_then(|_| lock.sync_all())
+        .map_err(|_| TokenStoreError::internal("Unable to clear renewal journal"))
 }
 
 /// Information about a stored identity token.
@@ -304,13 +392,16 @@ fn enforce_private_permissions(_path: &Path) -> std::io::Result<()> {
 /// operations) so concurrent processes cannot interleave their updates.
 async fn lock_store_file(path: &Path) -> Result<FSLock, TokenStoreError> {
     let path = path.to_path_buf();
-    lore_base::lore_spawn_blocking!(move || FSLock::acquire_file_lock(path))
-        .await
-        .map_err(|e| TokenStoreError::internal_with_context(e, "Failed to lock store file"))?
-        .map_err(|e| {
-            lore_warn!("Failed to lock store file: {e}");
-            TokenStoreError::internal_with_context(e, "Failed to lock store file")
-        })
+    lore_base::lore_spawn_blocking!(move || FSLock::acquire_file_lock_timeout(
+        path,
+        std::time::Duration::from_secs(10)
+    ))
+    .await
+    .map_err(|e| TokenStoreError::internal_with_context(e, "Failed to lock store file"))?
+    .map_err(|e| {
+        lore_warn!("Failed to lock store file: {e}");
+        TokenStoreError::internal_with_context(e, "Failed to lock store file")
+    })
 }
 
 /// Cross-process guard for `tokens.toml`, creating the store directory so
@@ -364,7 +455,7 @@ fn load_token_map(_guard: &FSLock) -> Result<TokenMap, TokenStoreError> {
         );
         TokenStoreError::internal_with_context(err, "Failed to load token map")
     })?;
-    lore_trace!("Loaded token map {config:?}");
+    lore_trace!("Loaded token map");
 
     Ok(config)
 }
@@ -374,15 +465,26 @@ fn load_token_map(_guard: &FSLock) -> Result<TokenMap, TokenStoreError> {
 fn store_token_map(_guard: &FSLock, token_map: &TokenMap) -> Result<(), TokenStoreError> {
     let path = token_map_path(true)?;
 
-    lore_trace!("Store token map: {token_map:?}");
+    lore_trace!("Store token map");
     let config_string = toml::to_string_pretty(token_map).map_err(|e| {
         lore_warn!("Failed to store token map: {e}");
         TokenStoreError::internal_with_context(e, "Failed to store token map")
     })?;
 
     let mut options = store_open_options();
-    options.create(true).write(true);
-    let mut config_file = match options.open(path.as_path()) {
+    options.create_new(true).write(true);
+    let mut random = [0_u8; 16];
+    SystemRandom::new()
+        .fill(&mut random)
+        .map_err(|_| TokenStoreError::internal("Unable to create token-map temporary name"))?;
+    let temporary = path.with_extension(format!(
+        "next-{}",
+        BASE64_STANDARD
+            .encode(random)
+            .replace('/', "_")
+            .replace('+', "-")
+    ));
+    let mut config_file = match options.open(&temporary) {
         Ok(file) => file,
         Err(err) => {
             lore_debug!("Failed to store token map file: {err}");
@@ -392,19 +494,21 @@ fn store_token_map(_guard: &FSLock, token_map: &TokenMap) -> Result<(), TokenSto
             ));
         }
     };
-    enforce_private_permissions(path.as_path()).map_err(|e| {
+    enforce_private_permissions(&temporary).map_err(|e| {
         TokenStoreError::internal_with_context(e, "Failed to secure token map permissions")
     })?;
 
-    // Truncate only after the write guard is held, so a concurrent reader
-    // can never observe a partially written file.
-    config_file
-        .set_len(0)
-        .and_then(|()| config_file.write_all(config_string.as_bytes()))
-        .map_err(|e| {
-            lore_warn!("Failed to store token map: {e}");
-            TokenStoreError::internal_with_context(e, "Failed to store token map")
-        })
+    // Publish both credentials together, retaining the previous complete file
+    // if a process is interrupted before rename. Close first for Windows.
+    let written = config_file
+        .write_all(config_string.as_bytes())
+        .and_then(|()| config_file.sync_all());
+    drop(config_file);
+    let result = written.and_then(|()| fs::rename(&temporary, &path));
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    result.map_err(|_| TokenStoreError::internal("Failed to atomically publish token map"))
 }
 
 fn use_secure_store() -> bool {
@@ -466,7 +570,25 @@ pub async fn store_user_token(
     auth_endpoint: &str,
     identity: &str,
     token: &str,
+    acceptable_root_domains: Vec<String>,
+) -> Result<(), TokenStoreError> {
+    store_user_session(
+        auth_endpoint,
+        identity,
+        token,
+        acceptable_root_domains,
+        None,
+    )
+    .await
+}
+
+/// Save an encrypted access/refresh pair in one locked map update.
+pub async fn store_user_session(
+    auth_endpoint: &str,
+    identity: &str,
+    token: &str,
     mut acceptable_root_domains: Vec<String>,
+    refresh: Option<&str>,
 ) -> Result<(), TokenStoreError> {
     let auth_endpoint = auth_endpoint.trim_end_matches('/');
 
@@ -478,6 +600,10 @@ pub async fn store_user_token(
     acceptable_root_domains.push(auth_domain);
 
     let encrypted_token = encrypt_token(token).await?;
+    let encrypted_refresh = match refresh {
+        Some(value) => Some(encrypt_token(value).await?),
+        None => None,
+    };
 
     lore_trace!(
         "Store user {identity} token for auth endpoint {auth_endpoint} and audiences '{acceptable_root_domains:?}'"
@@ -487,7 +613,7 @@ pub async fn store_user_token(
         user_id: identity.to_string(),
         token: encrypted_token,
         acceptable_root_domains,
-        refresh_token: None,
+        refresh_token: encrypted_refresh,
     };
 
     let token_map = token_map();
@@ -508,7 +634,9 @@ pub async fn store_user_token(
                 // Preserve existing refresh token when updating the auth token
                 let existing_refresh = remote.token[existing_index].refresh_token.take();
                 let mut new_token = identity_token;
-                new_token.refresh_token = existing_refresh;
+                if new_token.refresh_token.is_none() {
+                    new_token.refresh_token = existing_refresh;
+                }
                 remote.token[existing_index] = new_token;
                 lore_trace!(
                     "Replace user {identity} token for auth_endpoint {auth_endpoint} in existing entry"
@@ -1193,6 +1321,37 @@ impl NonceSequence for CounterNonceSequence {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn renewal_journal_survives_reopen_and_blocks_replay() {
+        let path = std::env::temp_dir().join(format!(
+            "portals-renewal-journal-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let mut file = store_open_options()
+            .create_new(true)
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        begin_refresh_attempt(&mut file, "fixture-one-time-credential").unwrap();
+        drop(file);
+        let mut file = store_open_options()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        assert!(begin_refresh_attempt(&mut file, "fixture-one-time-credential").is_err());
+        begin_refresh_attempt(&mut file, "new-login-credential").unwrap();
+        clear_refresh_attempt(&mut file).unwrap();
+        begin_refresh_attempt(&mut file, "new-login-credential").unwrap();
+        drop(file);
+        std::fs::remove_file(path).unwrap();
+    }
 
     #[cfg(unix)]
     #[test]

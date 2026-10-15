@@ -373,6 +373,19 @@ pub trait Authentication: Send + Sync {
         correlation_id: &str,
     ) -> Result<AuthenticationToken, ProtocolError>;
 
+    /// Providers can identify connection failures before dispatch. Existing
+    /// implementations default conservatively to an uncertain outcome.
+    async fn refresh_authentication_with_outcome(
+        &self,
+        auth_url: &str,
+        refresh_token: &str,
+        correlation_id: &str,
+    ) -> Result<AuthenticationToken, RefreshFailure> {
+        self.refresh_authentication(auth_url, refresh_token, correlation_id)
+            .await
+            .map_err(RefreshFailure::Uncertain)
+    }
+
     /// Exchanges an authentication token for an authorization token scoped
     /// to the given repository.
     async fn exchange_for_repository(

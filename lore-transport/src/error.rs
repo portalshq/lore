@@ -21,6 +21,7 @@ impl From<tonic::Status> for ProtocolError {
         match value.code() {
             tonic::Code::Unavailable | tonic::Code::Unknown => ProtocolError::from(Disconnected),
             tonic::Code::PermissionDenied => ProtocolError::from(NotAuthorized),
+            tonic::Code::Unauthenticated => ProtocolError::from(NotAuthenticated),
             tonic::Code::NotFound => ProtocolError::from(NotFound),
             tonic::Code::ResourceExhausted => ProtocolError::from(SlowDown),
             tonic::Code::OutOfRange => ProtocolError::from(Oversized {
