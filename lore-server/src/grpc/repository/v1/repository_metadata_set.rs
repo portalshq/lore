@@ -57,7 +57,7 @@ pub async fn handler(
     let repository_id: RepositoryId = repository_context.into();
     if let Some(authorization) = authorization {
         verify_authorization(&authorization, repository_id)
-            .map_err(|_| Status::permission_denied("Repository access denied"))?;
+            .map_err(|_source_error| Status::permission_denied("Repository access denied"))?;
     }
 
     let expected: Hash = req.expected.into();

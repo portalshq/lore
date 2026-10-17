@@ -46,8 +46,8 @@ fn healthcheck() -> Result<()> {
 }
 
 /// A host-network Lore task is not ready until its colocated Auth Gateway has
-/// accepted the private ReBAC socket. This is intentionally a TCP probe: the
-/// authenticated ReBAC RPC itself is exercised by the service integration tests.
+/// accepted the private `ReBAC` socket. This is intentionally a TCP probe: the
+/// authenticated `ReBAC` RPC itself is exercised by the service integration tests.
 fn rebac_healthcheck(timeout: Duration) -> Result<()> {
     let rebac_url =
         env::var("LORE_REBAC_URL").context("LORE_REBAC_URL is required for readiness")?;

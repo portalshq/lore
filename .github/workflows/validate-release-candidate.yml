@@ -7,8 +7,12 @@ on:
   pull_request:
     branches: ["0.8.4"]
     paths:
+      - "**/*.rs"
+      - "scripts/**"
+      - ".github/workflows/release.yml"
       - "Cargo.toml"
       - "Cargo.lock"
+      - "rust-toolchain.toml"
       - "lore-capi/lore.h"
       - ".github/workflows/validate-release-candidate.yml"
   workflow_dispatch:
@@ -34,8 +38,15 @@ jobs:
           python-version: "3.13"
       - name: Install release tools
         run: |
-          rustup toolchain install stable --profile minimal
+          # Refresh the hosted image's partially registered toolchain before
+          # installing the components required by rust-toolchain.toml.
+          rustup toolchain uninstall 1.97.0
+          rustup toolchain install 1.97.0 --profile minimal --component clippy --component rustfmt
           python -m pip install uv==0.10.12
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          shared-key: candidate
+          cache-on-failure: true
       - name: Run the release gate without publishing
         shell: bash
         run: |

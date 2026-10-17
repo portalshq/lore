@@ -74,12 +74,11 @@ if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
     exit 1
 fi
 
-# Fail fast with an actionable message instead of a half-hour build ending in
-# cargo's generic "--locked was passed" error.
-if ! cargo metadata --locked --format-version 1 >/dev/null 2>&1; then
-    echo "Cargo.lock is out of sync with Cargo.toml." >&2
-    echo "Run: cargo update --workspace" >&2
-    echo "Commit the updated Cargo.lock, then re-run this script." >&2
+# Validate the locked graph before compiling, retaining Cargo's real diagnostic.
+# Network, toolchain, and manifest errors must not be mislabeled as a stale lock.
+if ! cargo metadata --locked --format-version 1 >/dev/null; then
+    echo "Unable to resolve locked Cargo metadata; see the Cargo diagnostic above." >&2
+    echo "If Cargo reports a stale lockfile, run cargo update --workspace and commit the result." >&2
     exit 1
 fi
 

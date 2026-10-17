@@ -21,3 +21,16 @@ release gate on a clean hosted runner. It creates only a local release-branch na
 checks ancestry against the actual remote branch, and never pushes a branch or tag.
 This provides the required build/test capacity when a developer machine lacks disk.
 Publication and parent promotion remain explicit subsequent operations.
+
+Release and lint builds use the pinned Rust 1.97.0 toolchain. This keeps candidate
+validation and release artifacts on the same compiler rather than changing when
+`stable` advances. Rust 1.99 introduces a Clippy diagnostic in tonic/async-trait
+generated bindings; upgrading the compiler requires validating that generator
+compatibility first. No Clippy or security-audit rule is disabled.
+
+For hosted publication, dispatch the existing Release workflow on the release branch
+with `publish=true`. Its publication job reruns `release-local.sh --publish`, then
+explicitly dispatches the canonical artifact build on the new immutable tag. This
+explicit dispatch is necessary because tags pushed by `GITHUB_TOKEN` do not start
+push-triggered workflows. Normal tag runs and dispatches with `publish=false` only
+build, test, sign, and publish artifacts; they cannot create tags.
