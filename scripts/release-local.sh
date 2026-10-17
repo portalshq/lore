@@ -60,10 +60,10 @@ git merge-base --is-ancestor "origin/$CURRENT_BRANCH" HEAD || {
     exit 1
 }
 
-git diff --quiet && git diff --cached --quiet || {
+if ! git diff --quiet || ! git diff --cached --quiet; then
     echo "release requires a clean working tree" >&2
     exit 1
-}
+fi
 [[ -z "$(git status --short)" ]] || {
     echo "release requires no untracked files" >&2
     exit 1

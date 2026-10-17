@@ -2,8 +2,9 @@
 // SPDX-License-Identifier: MIT
 use std::fs;
 use std::io::Read;
+use std::io::Seek;
+use std::io::SeekFrom;
 use std::io::Write;
-use std::io::{Seek, SeekFrom};
 use std::path::Path;
 use std::path::PathBuf;
 use std::str;
@@ -1393,7 +1394,8 @@ mod tests {
     #[test]
     fn fallback_files_are_created_owner_only() {
         use std::os::unix::fs::PermissionsExt;
-        use std::time::{SystemTime, UNIX_EPOCH};
+        use std::time::SystemTime;
+        use std::time::UNIX_EPOCH;
         let path = std::env::temp_dir().join(format!(
             "lore-token-permissions-{}-{}",
             std::process::id(),

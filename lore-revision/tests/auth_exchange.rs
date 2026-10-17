@@ -213,10 +213,13 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires isolated LORE_AUTH_PATH and explicit nonproduction fallback store"]
     async fn renewal_serializes_and_preserves_identity() {
-        use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+        use std::sync::atomic::AtomicUsize;
+        use std::sync::atomic::Ordering;
+
+        use base64::Engine;
+        use base64::engine::general_purpose::URL_SAFE_NO_PAD;
         use lore_credential::token_store;
         use lore_transport::auth::exchange::authentication_token;
-        use std::sync::atomic::{AtomicUsize, Ordering};
         assert_eq!(std::env::var("LORE_AUTH_STORE").unwrap(), "fallback");
         assert_ne!(std::env::var("LORE_SECURITY_MODE").unwrap(), "strict");
         assert!(

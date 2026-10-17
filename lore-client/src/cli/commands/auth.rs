@@ -496,7 +496,8 @@ mod tests {
     use clap::Parser;
     use clap::Subcommand;
 
-    use super::{AuthLogoutCliArgs, logout_api_args};
+    use super::AuthLogoutCliArgs;
+    use super::logout_api_args;
 
     #[derive(Parser)]
     struct TestCli {

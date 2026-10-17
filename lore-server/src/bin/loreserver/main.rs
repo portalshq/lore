@@ -3,12 +3,16 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 use std::env;
-use std::io::{Read, Write};
-use std::net::{TcpStream, ToSocketAddrs};
+use std::io::Read;
+use std::io::Write;
+use std::net::TcpStream;
+use std::net::ToSocketAddrs;
 use std::thread::sleep;
 use std::time::Duration;
 
-use anyhow::{Context, Result, bail};
+use anyhow::Context;
+use anyhow::Result;
+use anyhow::bail;
 use lore_server::server::server_main;
 use lore_server::server_config::ServerConfig;
 

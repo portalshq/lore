@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 Digital Creations
+# SPDX-License-Identifier: MIT
+
 name: Validate release candidate
 
 on:
