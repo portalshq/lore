@@ -1,0 +1,45 @@
+name: Validate release candidate
+
+on:
+  pull_request:
+    branches: ["0.8.4"]
+    paths:
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "lore-capi/lore.h"
+      - ".github/workflows/validate-release-candidate.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: candidate-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  release-gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+      - name: Install release tools
+        run: |
+          rustup toolchain install stable --profile minimal
+          python -m pip install uv==0.10.12
+      - name: Run the release gate without publishing
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="$(sed -n 's/^version = "\([^"]*\)"$/\1/p' Cargo.toml | head -n 1)"
+          BASE_BRANCH="${VERSION%%-portals.*}"
+          # The gate checks the release branch name and requires the remote base
+          # to be an ancestor. This local branch never gets pushed by this job.
+          git switch -C "$BASE_BRANCH"
+          scripts/release-local.sh "v$VERSION"
