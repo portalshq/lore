@@ -939,7 +939,7 @@ Branch latest related commands
 
 ###### **Subcommands:**
 
-* `list` — 
+* `list` —
 
 
 
@@ -2689,9 +2689,9 @@ Manage the shared store
 
 ###### **Subcommands:**
 
-* `create` — 
-* `info` — 
-* `set-use-automatically` — 
+* `create` —
+* `info` —
+* `set-use-automatically` —
 
 
 
@@ -2738,4 +2738,3 @@ Manage the shared store
     This document was generated automatically by
     <a href="https://crates.io/crates/clap-markdown"><code>clap-markdown</code></a>.
 </i></small>
-

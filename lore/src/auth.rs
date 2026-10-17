@@ -482,13 +482,17 @@ async fn logout_local(
                         args.user_id.as_str(),
                     )
                     .await
+                        && let Ok(auth_impl) = lore_transport::auth::authentication::find(&auth_url)
+                        && !matches!(
+                            tokio::time::timeout(
+                                std::time::Duration::from_secs(10),
+                                auth_impl.revoke_refresh(&auth_url, &refresh, ""),
+                            )
+                            .await,
+                            Ok(Ok(_))
+                        )
                     {
-                        if let Ok(auth_impl) = lore_transport::auth::authentication::find(&auth_url)
-                        {
-                            if !matches!(tokio::time::timeout(std::time::Duration::from_secs(10), auth_impl.revoke_refresh(&auth_url, &refresh, "")).await, Ok(Ok(_))) {
-                                eprintln!("Local logout will continue; remote session revocation could not be confirmed.");
-                            }
-                        }
+                        eprintln!("Local logout will continue; remote session revocation could not be confirmed.");
                     }
                 } else {
                     // No user_id: revoke all identities' families for this auth URL
@@ -500,14 +504,18 @@ async fn logout_local(
                                 &auth_url, &identity,
                             )
                             .await
-                            {
-                                if let Ok(auth_impl) =
+                                && let Ok(auth_impl) =
                                     lore_transport::auth::authentication::find(&auth_url)
-                                {
-                                    if !matches!(tokio::time::timeout(std::time::Duration::from_secs(10), auth_impl.revoke_refresh(&auth_url, &refresh, "")).await, Ok(Ok(_))) {
-                                        eprintln!("Local logout will continue; remote session revocation could not be confirmed.");
-                                    }
-                                }
+                                && !matches!(
+                                    tokio::time::timeout(
+                                        std::time::Duration::from_secs(10),
+                                        auth_impl.revoke_refresh(&auth_url, &refresh, ""),
+                                    )
+                                    .await,
+                                    Ok(Ok(_))
+                                )
+                            {
+                                eprintln!("Local logout will continue; remote session revocation could not be confirmed.");
                             }
                         }
                     }

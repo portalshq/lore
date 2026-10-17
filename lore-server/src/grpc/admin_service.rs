@@ -151,10 +151,11 @@ impl AdminService for LoreAdminService {
 
 #[cfg(test)]
 mod security_tests {
+    use tonic::Code;
+
     use super::*;
     use crate::notification::testing::MockNotificationSender;
     use crate::store::test_store_create;
-    use tonic::Code;
 
     #[tokio::test]
     async fn disabled_admin_service_returns_unimplemented_before_store_access() {

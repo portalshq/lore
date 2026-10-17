@@ -22,7 +22,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.8.4-portals.11"
+version = "0.8.4-portals.12"
 
 [workspace.dependencies]
 lore = { path = "lore" }
@@ -109,7 +109,7 @@ reqwest = { version = "0.12.23", default-features = false, features = [
 ] }
 ring = "0.17.14"
 # We configure rustls to not bring in aws-lc-sys, which seems to have build issues on Windows.
-rustls = { version = "0.23.31", default-features = false, features = [
+rustls = { version = "0.23.46", default-features = false, features = [
     "std",
     "logging",
     "ring",

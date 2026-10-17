@@ -2,8 +2,9 @@
 // SPDX-License-Identifier: MIT
 use std::fs;
 use std::io::Read;
+use std::io::Seek;
+use std::io::SeekFrom;
 use std::io::Write;
-use std::io::{Seek, SeekFrom};
 use std::path::Path;
 use std::path::PathBuf;
 use std::str;
@@ -171,9 +172,9 @@ pub async fn lock_refresh(
         .read(true)
         .write(true)
         .open(&path)
-        .map_err(|_| TokenStoreError::internal("Unable to open refresh lock"))?;
+        .map_err(|_source_error| TokenStoreError::internal("Unable to open refresh lock"))?;
     enforce_private_permissions(&path)
-        .map_err(|_| TokenStoreError::internal("Unable to secure refresh lock"))?;
+        .map_err(|_source_error| TokenStoreError::internal("Unable to secure refresh lock"))?;
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(15);
     loop {
         match file.try_lock() {
@@ -203,12 +204,12 @@ pub fn begin_refresh_attempt(lock: &mut fs::File, refresh: &str) -> Result<(), T
     let fingerprint = BASE64_STANDARD
         .encode(ring::digest::digest(&ring::digest::SHA256, refresh.as_bytes()).as_ref());
     lock.seek(SeekFrom::Start(0))
-        .map_err(|_| TokenStoreError::internal("Unable to read renewal journal"))?;
+        .map_err(|_source_error| TokenStoreError::internal("Unable to read renewal journal"))?;
     let mut previous = String::new();
     (&mut *lock)
         .take(128)
         .read_to_string(&mut previous)
-        .map_err(|_| TokenStoreError::internal("Unable to read renewal journal"))?;
+        .map_err(|_source_error| TokenStoreError::internal("Unable to read renewal journal"))?;
     if !previous.is_empty() {
         if BASE64_STANDARD
             .decode(&previous)
@@ -228,13 +229,13 @@ pub fn begin_refresh_attempt(lock: &mut fs::File, refresh: &str) -> Result<(), T
         .and_then(|_| lock.set_len(0))
         .and_then(|_| lock.write_all(fingerprint.as_bytes()))
         .and_then(|_| lock.sync_all())
-        .map_err(|_| TokenStoreError::internal("Unable to persist renewal journal"))
+        .map_err(|_source_error| TokenStoreError::internal("Unable to persist renewal journal"))
 }
 
 pub fn clear_refresh_attempt(lock: &mut fs::File) -> Result<(), TokenStoreError> {
     lock.set_len(0)
         .and_then(|_| lock.sync_all())
-        .map_err(|_| TokenStoreError::internal("Unable to clear renewal journal"))
+        .map_err(|_source_error| TokenStoreError::internal("Unable to clear renewal journal"))
 }
 
 /// Information about a stored identity token.
@@ -492,7 +493,9 @@ fn store_token_map(_guard: &FSLock, token_map: &TokenMap) -> Result<(), TokenSto
     let mut random = [0_u8; 16];
     SystemRandom::new()
         .fill(&mut random)
-        .map_err(|_| TokenStoreError::internal("Unable to create token-map temporary name"))?;
+        .map_err(|_source_error| {
+            TokenStoreError::internal("Unable to create token-map temporary name")
+        })?;
     let temporary = path.with_extension(format!(
         "next-{}",
         BASE64_STANDARD
@@ -524,7 +527,9 @@ fn store_token_map(_guard: &FSLock, token_map: &TokenMap) -> Result<(), TokenSto
     if result.is_err() {
         let _ = fs::remove_file(&temporary);
     }
-    result.map_err(|_| TokenStoreError::internal("Failed to atomically publish token map"))
+    result.map_err(|_source_error| {
+        TokenStoreError::internal("Failed to atomically publish token map")
+    })
 }
 
 fn use_secure_store() -> bool {
@@ -1393,7 +1398,8 @@ mod tests {
     #[test]
     fn fallback_files_are_created_owner_only() {
         use std::os::unix::fs::PermissionsExt;
-        use std::time::{SystemTime, UNIX_EPOCH};
+        use std::time::SystemTime;
+        use std::time::UNIX_EPOCH;
         let path = std::env::temp_dir().join(format!(
             "lore-token-permissions-{}-{}",
             std::process::id(),

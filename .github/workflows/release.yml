@@ -4,6 +4,13 @@
 name: Release
 
 on:
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: Rerun all release gates and publish a new immutable tag
+        required: true
+        default: false
+        type: boolean
   push:
     tags:
       - "v*-portals.*"
@@ -11,8 +18,53 @@ on:
 permissions: {}
 
 jobs:
+  publish-tag:
+    name: Validate and publish immutable tag
+    if: github.event_name == 'workflow_dispatch' && inputs.publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    concurrency:
+      group: publish-lore-${{ github.ref }}
+      cancel-in-progress: false
+    permissions:
+      contents: write
+      actions: write
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.13"
+      - name: Install release tools
+        run: |
+          rustup toolchain uninstall 1.97.0
+          rustup toolchain install 1.97.0 --profile minimal --component clippy --component rustfmt
+          python -m pip install uv==0.10.12
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          shared-key: candidate
+          cache-on-failure: true
+      - name: Run gates and publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="$(sed -n 's/^version = "\([^"]*\)"$/\1/p' Cargo.toml | head -n 1)"
+          BASE_BRANCH="${VERSION%%-portals.*}"
+          test "$GITHUB_REF" = "refs/heads/$BASE_BRANCH"
+          git switch "$BASE_BRANCH"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          scripts/release-local.sh "v$VERSION" --publish
+          # Tags pushed by GITHUB_TOKEN do not trigger push workflows. Explicit
+          # dispatch runs the canonical signed build at the new immutable tag.
+          gh workflow run release.yml --ref "v$VERSION" -f publish=false
+
   test:
     name: Test release source
+    if: github.event_name != 'workflow_dispatch' || !inputs.publish
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -25,7 +77,10 @@ jobs:
           python-version: "3.13"
       - name: Install build tools
         run: |
-          rustup toolchain install stable --profile minimal
+          # Refresh the hosted image's partially registered toolchain before
+          # installing the components required by rust-toolchain.toml.
+          rustup toolchain uninstall 1.97.0
+          rustup toolchain install 1.97.0 --profile minimal --component clippy --component rustfmt
           python -m pip install uv==0.10.12
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
@@ -82,7 +137,10 @@ jobs:
       - name: Install Rust target
         shell: bash
         run: |
-          rustup toolchain install stable --profile minimal
+          # Refresh the hosted image's partially registered toolchain before
+          # installing the components required by rust-toolchain.toml.
+          rustup toolchain uninstall 1.97.0
+          rustup toolchain install 1.97.0 --profile minimal --component clippy --component rustfmt
           rustup target add "${{ matrix.target }}"
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:

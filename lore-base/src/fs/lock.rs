@@ -43,7 +43,7 @@ impl FSLock {
             match file.try_lock() {
                 Ok(()) => return Ok(Self { file }),
                 Err(std::fs::TryLockError::WouldBlock) if std::time::Instant::now() < deadline => {
-                    std::thread::sleep(Duration::from_millis(10))
+                    std::thread::sleep(Duration::from_millis(10));
                 }
                 Err(std::fs::TryLockError::WouldBlock) => {
                     return Err(std::io::Error::new(

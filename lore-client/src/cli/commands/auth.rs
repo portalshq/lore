@@ -491,35 +491,6 @@ pub fn handle_auth_commands(cmd: &AuthCommands, globals: LoreGlobalArgs) -> u8 {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use clap::Parser;
-    use clap::Subcommand;
-
-    use super::{AuthLogoutCliArgs, logout_api_args};
-
-    #[derive(Parser)]
-    struct TestCli {
-        #[command(subcommand)]
-        command: TestCommand,
-    }
-
-    #[derive(Subcommand)]
-    enum TestCommand {
-        Logout(AuthLogoutCliArgs),
-    }
-
-    #[test]
-    fn logout_remote_url_is_parsed_and_passed_to_the_auth_api() {
-        let cli = TestCli::try_parse_from(["lore", "logout", "lore://example.test"])
-            .expect("logout remote URL should parse");
-        let TestCommand::Logout(args) = cli.command;
-
-        let api_args = logout_api_args(&args);
-        assert_eq!(api_args.remote_url.as_str(), "lore://example.test");
-    }
-}
-
 pub fn resolve_user_ids(
     globals: LoreGlobalArgs,
     user_ids: &[LoreString],
@@ -558,5 +529,35 @@ pub fn resolve_user_ids(
     match Arc::try_unwrap(auth_data) {
         Ok(auth_data) => auth_data.into_inner(),
         Err(_) => HashMap::default(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::Parser;
+    use clap::Subcommand;
+
+    use super::AuthLogoutCliArgs;
+    use super::logout_api_args;
+
+    #[derive(Parser)]
+    struct TestCli {
+        #[command(subcommand)]
+        command: TestCommand,
+    }
+
+    #[derive(Subcommand)]
+    enum TestCommand {
+        Logout(AuthLogoutCliArgs),
+    }
+
+    #[test]
+    fn logout_remote_url_is_parsed_and_passed_to_the_auth_api() {
+        let cli = TestCli::try_parse_from(["lore", "logout", "lore://example.test"])
+            .expect("logout remote URL should parse");
+        let TestCommand::Logout(args) = cli.command;
+
+        let api_args = logout_api_args(&args);
+        assert_eq!(api_args.remote_url.as_str(), "lore://example.test");
     }
 }

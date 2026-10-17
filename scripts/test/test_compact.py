@@ -1,5 +1,6 @@
 # SPDX-FileCopyrightText: 2026 Epic Games, Inc.
 # SPDX-License-Identifier: MIT
+import hashlib
 import logging
 import os
 import random
@@ -239,20 +240,31 @@ def test_sync_reload_triggers_load_driven_gc(new_lore_repo):
 
     # 110 MiB across individual 10 MiB commits.
     repo.make_dirs("bulk")
+    expected = {}
     for i in range(11):
-        with repo.open_file(os.path.join("bulk", f"{i}.bin"), "w+b") as f:
-            f.write(os.urandom(10 * 1024 * 1024))
+        name = os.path.join("bulk", f"{i}.bin")
+        data = os.urandom(10 * 1024 * 1024)
+        expected[name] = hashlib.sha256(data).hexdigest()
+        with repo.open_file(name, "w+b") as f:
+            f.write(data)
         repo.stage(scan=True)
         repo.commit(f"Bulk {i}", local=True)
     repo.push(max_connections=16)
 
-    # Tiny size cap so the forward sync's reload trips compaction; keep the capacity cap
-    # high so eviction doesn't remove fragments the same sync is still materializing.
-    _set_store_caps(repo, max_size="100", max_capacity="2_000_000")
-
+    # Keep normal caps during the backward sync so it retains the cached bulk
+    # packfiles. With tiny caps here, that sync can compact away the data before
+    # the forward operation loads it; freshly fetched writes do not increment
+    # the load-driven counters.
     repo.sync(revision="@1", reset=True)
+
+    # Only the forward sync is under test. Keep the capacity cap high so eviction
+    # does not remove fragments the same sync is still materializing.
+    _set_store_caps(repo, max_size="100", max_capacity="2_000_000")
     out = repo.sync(reset=True, json=True)
 
     assert parse_jsonl(out, "compactionBegin"), (
         "sync's full reload should fire the load-driven compaction trigger"
     )
+    for name, digest in expected.items():
+        with repo.open_file(name, "rb") as f:
+            assert hashlib.sha256(f.read()).hexdigest() == digest
