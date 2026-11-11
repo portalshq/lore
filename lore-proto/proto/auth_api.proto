@@ -14,6 +14,12 @@ service UrcAuthApi {
   rpc VerifyUser(VerifyUserRequest)
       returns (VerifyUserResponse) {};
 
+  // Sets the caller's chat-visible display name. Cosmetic only: the value is
+  // user-chosen, settable once, and must never derive from account data (email,
+  // login name, subject id). Requires the caller's user token.
+  rpc SetUserDisplayName(SetUserDisplayNameRequest)
+      returns (SetUserDisplayNameResponse) {};
+
   // For external authentication token login
   rpc ExchangeExternalTokenForUserToken(ExchangeExternalTokenForUserTokenRequest) returns (ExchangeExternalTokenForUserTokenResponse) {};
 
@@ -47,7 +53,13 @@ message HealthCheckRequest {}
 
 message HealthCheckResponse { string status = 1; }
 
-message StartAuthSessionRequest { string client_state = 1; }
+message StartAuthSessionRequest {
+  string client_state = 1;
+  // Optional absolute https/http URI the browser is redirected to after the
+  // hosted login completes (same-tab flow). Must match the gateway's
+  // AUTH_LOGIN_REDIRECT_ALLOWLIST; omitted keeps the interstitial HTML page.
+  optional string post_login_redirect_uri = 2;
+}
 
 message StartAuthSessionResponse {
   string session_code = 1;
@@ -144,8 +156,14 @@ message GetUserInfoRequest {
 
 message UserInfo {
   string user_id = 1;
+  // Chat-visible cosmetic name, chosen by the user via SetUserDisplayName.
+  // Empty until chosen; never derived from email, login name, or subject id.
   string display_name = 2;
 }
+
+message SetUserDisplayNameRequest { string display_name = 1; }
+
+message SetUserDisplayNameResponse { UserInfo user_info = 1; }
 
 message GetUserInfoResponse {
   repeated UserInfo user_info = 1;
